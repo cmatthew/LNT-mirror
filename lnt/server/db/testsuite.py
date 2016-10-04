@@ -170,6 +170,7 @@ class RunField(FieldMixin, Base):
     def __repr__(self):
         return '%s%r' % (self.__class__.__name__, (self.name, self.info_key))
 
+
 class SampleField(FieldMixin, Base):
     __tablename__ = 'TestSuiteSampleFields'
 
@@ -191,8 +192,8 @@ class SampleField(FieldMixin, Base):
     # reports the status (pass/fail/etc.) code related to this value. This
     # association is used by UI code to present the two status fields together.
     status_field_id = Column("status_field", Integer, ForeignKey(
-            'StatusKind.ID'))
-    status_field = relation('StatusKind')
+            'TestSuiteSampleFields.ID'))
+    status_field = relation('SampleField', remote_side=id)
 
     # Most real type samples assume lower values are better than higher values.
     # This assumption can be inverted by setting this column to nonzero.
