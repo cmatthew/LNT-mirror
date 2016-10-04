@@ -26,14 +26,14 @@ def upgrade(engine):
     session.commit()
     # upgrade_3_to_4.py added this column, so it is not in the ORM.
     session.connection().execute("""
-UPDATE "TestSuiteSampleFields"
+UPDATE TestSuiteSampleFields
 SET bigger_is_better=0
-WHERE "Name"='code_size'
+WHERE Name='code_size'
                                  """)
     session.commit()
 
     session.connection().execute("""
-ALTER TABLE "NT_Sample"
-ADD COLUMN "code_size" FLOAT
+ALTER TABLE NT_Sample
+ADD COLUMN code_size FLOAT
 """)
     session.commit()

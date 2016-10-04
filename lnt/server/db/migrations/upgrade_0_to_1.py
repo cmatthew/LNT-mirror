@@ -19,7 +19,7 @@ class SampleType(Base):
 
 class StatusKind(Base):
     __tablename__ = 'StatusKind'
-    id = Column("ID", Integer, primary_key=True)
+    id = Column("ID", Integer, primary_key=True, autoincrement=False)
     name = Column("Name", String(256), unique=True)
 
 class TestSuite(Base):
@@ -181,7 +181,7 @@ def get_base_for_testsuite(test_suite):
         id = Column("ID", Integer, primary_key=True)
         name = Column("Name", String(256), index=True)
 
-        parameters_data = Column("Parameters", Binary)
+        parameters_data = Column("Parameters", Binary, index=False, unique=False)
 
         class_dict = locals()
         for item in test_suite.machine_fields:
@@ -224,7 +224,7 @@ def get_base_for_testsuite(test_suite):
         end_time = Column("EndTime", DateTime)
         simple_run_id = Column("SimpleRunID", Integer)
 
-        parameters_data = Column("Parameters", Binary)
+        parameters_data = Column("Parameters", Binary, index=False, unique=False)
 
         machine = sqlalchemy.orm.relation(Machine)
         order = sqlalchemy.orm.relation(Order)
@@ -258,7 +258,7 @@ def get_base_for_testsuite(test_suite):
         for item in test_suite.sample_fields:
             if item.name in class_dict:
                 raise ValueError("test suite defines reserved key {}"
-                                 .format(name))
+                                 .format(item.name))
 
             if item.type.name == 'Real':
                 item.column = Column(item.name, Float)
@@ -276,7 +276,7 @@ def get_base_for_testsuite(test_suite):
     sqlalchemy.schema.Index("ix_%s_Sample_RunID_TestID" % db_key_name,
                             Sample.run_id, Sample.test_id)
 
-    args = [Machine.name, Machine.parameters_data]
+    args = [Machine.name]
     for item in test_suite.machine_fields:
         args.append(item.column)
     sqlalchemy.schema.Index("ix_%s_Machine_Unique" % db_key_name,

@@ -30,9 +30,9 @@ def upgrade(engine):
     session.commit()
     # upgrade_3_to_4.py added this column, so it is not in the ORM.
     session.connection().execute("""
-UPDATE "TestSuiteSampleFields"
+UPDATE TestSuiteSampleFields
 SET bigger_is_better=0
-WHERE "Name"='mem_bytes'
+WHERE Name='mem_bytes'
                                  """)
     session.commit()
 
@@ -40,8 +40,8 @@ WHERE "Name"='mem_bytes'
     # trying to find out how to do it properly in SQLAlchemy without
     # SQLAlchemy-migrate installed.
     session.connection().execute("""
-ALTER TABLE "NT_Sample"
-ADD COLUMN "mem_bytes" FLOAT
+ALTER TABLE NT_Sample
+ADD COLUMN mem_bytes FLOAT
 """)
     session.commit()
 

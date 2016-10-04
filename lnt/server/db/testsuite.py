@@ -43,7 +43,7 @@ class StatusKind(Base):
 
     __tablename__ = 'StatusKind'
 
-    id = Column("ID", Integer, primary_key=True)
+    id = Column("ID", Integer, primary_key=True, autoincrement=False)
     name = Column("Name", String(256), unique=True)
     
     def __init__(self, id, name):
@@ -191,8 +191,8 @@ class SampleField(FieldMixin, Base):
     # reports the status (pass/fail/etc.) code related to this value. This
     # association is used by UI code to present the two status fields together.
     status_field_id = Column("status_field", Integer, ForeignKey(
-            'TestSuiteSampleFields.ID'))
-    status_field = relation('SampleField', remote_side=id)
+            'StatusKind.ID'))
+    status_field = relation('StatusKind')
 
     # Most real type samples assume lower values are better than higher values.
     # This assumption can be inverted by setting this column to nonzero.

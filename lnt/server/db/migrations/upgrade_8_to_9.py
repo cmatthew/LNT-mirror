@@ -50,8 +50,8 @@ def upgrade_testsuite(engine, session, name):
     Base = add_profiles(test_suite)
 
     session.connection().execute("""
-ALTER TABLE "%s_Sample"
-ADD COLUMN "ProfileID" INTEGER
+ALTER TABLE %s_Sample
+ADD COLUMN ProfileID INTEGER
     """ % (db_key_name,))
 
     # Create tables. We commit now since databases like Postgres run

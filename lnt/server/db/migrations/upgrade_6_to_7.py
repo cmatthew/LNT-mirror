@@ -41,14 +41,14 @@ def upgrade(engine):
     session.commit()
 
     session.connection().execute("""
-ALTER TABLE "NT_Sample"
-ADD COLUMN "hash_status" INTEGER
+ALTER TABLE NT_Sample
+ADD COLUMN hash_status INTEGER
 """)
     # For MD5 hashes, 32 characters is enough to store the full has.
     # Assume that for hashing schemes producing longer hashes, storing
     # just the first 32 characters is good enough for our use case.
     session.connection().execute("""
-ALTER TABLE "NT_Sample"
-ADD COLUMN "hash" VARCHAR(32)
+ALTER TABLE NT_Sample
+ADD COLUMN hash VARCHAR(32)
 """)
     session.commit()

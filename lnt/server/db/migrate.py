@@ -25,6 +25,7 @@ Base = sqlalchemy.ext.declarative.declarative_base()
 
 class SchemaVersion(Base):
     __tablename__ = 'SchemaVersion'
+    __table_args__ = {'mysql_charset': 'utf8', 'mysql_engine': 'InnoDB'}
 
     name = Column("Name", String(256), primary_key=True, unique=True)
     version = Column("Version", Integer)
@@ -181,9 +182,11 @@ def update(engine):
         message = e.orig.message
         if 'no such table' in message:
             return False
+        if 'Table' in str(message) and "doesn't exist" in str(message):
+            return False
         if 'relation' in message and 'does not exist' in message:
             return False
-        return True
+        return False
 
     # Load all the information from the versions tables. We just do the query
     # and handle the exception if the table hasn't been defined yet (for
