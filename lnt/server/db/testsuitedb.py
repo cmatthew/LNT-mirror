@@ -864,7 +864,7 @@ test %r is misnamed for reporting under schema %r""" % (
                 import pprint
                 warning("Found a new test:" + test_name)
                 note("Test cache state:" + pprint.pformat(test_cache))
-                test_cache[test_name] = test = self.Test(test_name)
+                test_cache[str(test_name)] = test = self.Test(test_name)
                 self.add(test)
 
             for i, value in enumerate(test_samples):
