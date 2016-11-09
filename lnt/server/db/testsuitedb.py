@@ -861,6 +861,7 @@ test %r is misnamed for reporting under schema %r""" % (
             # Get or create the test.
             test = test_cache.get(str(test_name))
             if test is None:
+                note(pprint.pformat(self.query(self.Test).filter(self.Test.name == test_name).all()))
                 import pprint
                 warning("Found a new test: " + test_name + "Full name: " + name)
                 note("Test cache state:" + pprint.pformat(test_cache))
