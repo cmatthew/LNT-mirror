@@ -804,7 +804,9 @@ supplied run is missing required run parameter: %r""" % (
 
         # Load a map of all the tests, which we will extend when we find tests
         # that need to be added.
-        test_cache = dict((test.name, test)
+        # str call works around an issue where unicode test names were not
+        # matching.
+        test_cache = dict((str(test.name), test)
                           for test in self.query(self.Test))
 
         # First, we aggregate all of the samples by test name. The schema allows
@@ -857,7 +859,7 @@ test %r is misnamed for reporting under schema %r""" % (
                         name)
 
             # Get or create the test.
-            test = test_cache.get(test_name)
+            test = test_cache.get(str(test_name))
             if test is None:
                 import pprint
                 warning("Found a new test:" + test_name)
