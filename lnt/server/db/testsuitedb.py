@@ -14,6 +14,7 @@ from sqlalchemy import *
 
 import testsuite
 import lnt.testing.profile.profile as profile
+from lnt.testing.util.commands import warning, note
 
 def strip(obj):
     """Give back a dict without sqlalchemy stuff."""
@@ -858,6 +859,9 @@ test %r is misnamed for reporting under schema %r""" % (
             # Get or create the test.
             test = test_cache.get(test_name)
             if test is None:
+                import pprint
+                warning("Found a new test:" + test_name)
+                note("Test cache state:" + pprint.pformat(test_cache))
                 test_cache[test_name] = test = self.Test(test_name)
                 self.add(test)
 
