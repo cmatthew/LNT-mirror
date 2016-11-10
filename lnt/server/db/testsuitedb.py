@@ -862,13 +862,16 @@ test %r is misnamed for reporting under schema %r""" % (
             test = test_cache.get(str(test_name))
             if test is None:
                 import pprint
-                note(pprint.pformat(self.query(self.Test).filter(self.Test.name == test_name).all()))
+                try:
+                    test = self.query(self.Test).filter(self.Test.name == test_name).one()
+                    test_cache[str(test_name)] = test
 
-                warning("Found a new test: " + test_name + "Full name: " + name)
-                note("Test cache state:" + pprint.pformat(test_cache))
-                test_cache[str(test_name)] = test = self.Test(test_name)
-                assert test_cache.get(str(test_name)) == test
-                self.add(test)
+                except:
+                    warning("Found a new test: " + test_name + "Full name: " + name)
+                    note("Test cache state:" + pprint.pformat(test_cache))
+                    test_cache[str(test_name)] = test = self.Test(test_name)
+                    assert test_cache.get(str(test_name)) == test
+                    self.add(test)
 
             for i, value in enumerate(test_samples):
                 record_key = (test_name, i)
