@@ -1438,7 +1438,7 @@ def v4_matrix():
                                   cur_samples,
                                   prev_samples,
                                   None, None,
-                                  confidence_lv=0.001,
+                                  confidence_lv=0.01,
                                   bigger_is_better=False)
             req.change[order] = cr
 
