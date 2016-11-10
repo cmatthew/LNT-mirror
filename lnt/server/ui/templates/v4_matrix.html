@@ -12,7 +12,7 @@
 
 {% macro get_cell_value(cr) %}
   {% set test_status = cr.get_test_status() %}
-  {% set value_status = cr.get_value_status(ignore_small=not options.show_small_diff) %}
+  {% set value_status = cr.get_value_status(ignore_small=not options.show_small_diff, min_pct_delta=0.025) %}
   {% set run_cell_value = "-" if cr.current is none else "%.4f" % cr.current %}
 
   {% if value_status != analysis.UNCHANGED_PASS and value_status != analysis.UNCHANGED_FAIL %}

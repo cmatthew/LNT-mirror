@@ -176,7 +176,7 @@ class ComparisonResult:
     # significant - for execution time. It can be significant for compile time.
     def get_value_status(self, confidence_interval=2.576,
                          value_precision=MIN_VALUE_PRECISION,
-                         ignore_small=True):
+                         ignore_small=True, min_pct_delta=.01):
         if self.current is None or self.previous is None:
             return None
 
@@ -194,7 +194,7 @@ class ComparisonResult:
 
         # Always ignore percentage changes below 1%, for now, we just don't have
         # enough time to investigate that level of stuff.
-        if ignore_small and abs(self.pct_delta) < .01:
+        if ignore_small and abs(self.pct_delta) < min_pct_delta:
             return UNCHANGED_PASS
 
         # Always ignore changes with small deltas. There is no mathematical
