@@ -345,10 +345,10 @@ class RunInfo(object):
             # All current hash_values should all be the same.
             # Warn in the log when the hash wasn't the same for all samples.
             cur_hash_set = set(hash_values)
-            if len(cur_hash_set) > 1:
-                logger.warning(("Found different hashes for multiple samples " +
-                                "in the same run {0}: {1}\nTestID:{2}").format(
-                               runs, hash_values, test_id))
+            #if len(cur_hash_set) > 1:
+            #    logger.warning(("Found different hashes for multiple samples " +
+            #                    "in the same run {0}: {1}\nTestID:{2}").format(
+            #                   runs, hash_values, test_id))
 
             cur_hash = hash_values[0] if len(hash_values) > 0 else None
             prev_hash = prev_hash_values[0] \
