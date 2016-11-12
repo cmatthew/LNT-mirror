@@ -63,7 +63,7 @@
             {% set baseline_msg= "Baseline<br>" if order == baseline_rev else "" %}
             {% set baseline_rev = None if order == baseline_rev else "" %}
             <tr class="{{baseline_class}}">
-                <td><a href="{{v4_url_for('v4_order', id=order_to_id[order])}}">{{ baseline_msg }}{{order}}</a>
+                <td>{{ baseline_msg|safe }}<a href="{{v4_url_for('v4_order', id=order_to_id[order])}}">{{order}}</a> <a href="http://llvm.org/viewvc/llvm-project?view=revision&revision={{ order }}"><i class="icon-eye-open"></i></a>
                     <br>
                 <span class="shortDateFormat" data-toggle="tooltip" title="{{order_to_date[order]}}">{{ order_to_date[order].isoformat() }}</span>
                 </td>
