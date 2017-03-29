@@ -69,6 +69,25 @@ XML_REPORT_TEMPLATE = """<?xml version="1.0" encoding="UTF-8"?>
 </testsuites>
 """
 
+CSV_REPORT_TEMPLATE = \
+"""Program;CC;CC_Time;CC_Hash;Exec;Exec_Time;Score
+{%- for suite in suites -%}
+    {%- for test in suite.tests %}
+{{ suite.name }}/{{ test.path }}/{{ test.name }};
+        {%- if test.code == "NOEXE" -%}
+            fail;*;*;
+        {%- else -%}
+            pass;{{ test.metrics.compile_time if test.metrics }};{{ test.metrics.hash if test.metrics }};
+        {%- endif -%}
+        {%- if test.code == "FAIL" or test.code == "NOEXE" -%}
+            fail;*;*;
+        {%- else -%}
+            pass;{{ test.metrics.exec_time if test.metrics }};{{ test.metrics.score if test.metrics }};
+        {%- endif -%}
+    {% endfor %}
+{%- endfor -%}
+"""
+
 # _importProfile imports a single profile. It must be at the top level (and
 # not within TestSuiteTest) so that multiprocessing can import it correctly.
 def _importProfile(name_filename):
@@ -90,11 +109,7 @@ def _importProfile(name_filename):
                                    str)
 
 
-def _lit_json_to_xunit_xml(json_reports):
-    # type: (list) -> str
-    """Take the lit report jason dicts and convert them
-    to an xunit xml report for CI to digest."""
-    template_engine = jinja2.Template(XML_REPORT_TEMPLATE, autoescape=True)
+def _lit_json_to_template(json_reports, template_engine):
     # For now, only show first runs report.
     json_report = json_reports[0]
     tests_by_suite = defaultdict(list)
@@ -112,7 +127,8 @@ def _lit_json_to_xunit_xml(json_reports):
         entry = {'name': test_name,
                  'path': '.'.join(path),
                  'time': time,
-                 'code': code}
+                 'code': code,
+                 'metrics': tests.get('metrics', None)}
         if code != "PASS":
             entry['output'] = output
 
@@ -132,6 +148,23 @@ def _lit_json_to_xunit_xml(json_reports):
         suites.append(entry)
     str_template = template_engine.render(suites=suites)
     return str_template
+
+
+def _lit_json_to_xunit_xml(json_reports):
+    # type: (list) -> str
+    """Take the lit report jason dicts and convert them
+    to an xunit xml report for CI to digest."""
+    template_engine = jinja2.Template(XML_REPORT_TEMPLATE, autoescape=True)
+    return _lit_json_to_template(json_reports, template_engine)
+
+
+def _lit_json_to_csv(json_reports):
+    # type: (list) -> str
+    """Take the lit report json dicts and convert them
+    to a csv report, similar to the old test-suite make-based
+    *.report.simple.csv files."""
+    template_engine = jinja2.Template(CSV_REPORT_TEMPLATE, autoescape=True)
+    return _lit_json_to_template(json_reports, template_engine)
 
 
 class TestSuiteTest(BuiltinTest):
@@ -169,7 +202,7 @@ class TestSuiteTest(BuiltinTest):
                          type=str, metavar="PATH",
                          help="Path to the LLVM test-suite externals")
         group.add_option("", "--cmake-define", dest="cmake_defines",
-                         action="append",
+                         action="append", default=[],
                          help=("Defines to pass to cmake. These do not require the "
                                "-D prefix and can be given multiple times. e.g.: "
                                "--cmake-define A=B => -DA=B"))
@@ -187,19 +220,6 @@ class TestSuiteTest(BuiltinTest):
                          type=str, default=None,
                          help="Path to the C++ compiler to test (inferred from"
                               " --cc where possible")
-        group.add_option("", "--llvm-arch", dest="llvm_arch",
-                         type='choice', default=None,
-                         help="Override the CMake-inferred architecture",
-                         choices=TEST_SUITE_KNOWN_ARCHITECTURES)
-        group.add_option("", "--cross-compiling", dest="cross_compiling",
-                         action="store_true", default=False,
-                         help="Inform CMake that it should be cross-compiling")
-        group.add_option("", "--cross-compiling-system-name", type=str,
-                         default=None, dest="cross_compiling_system_name",
-                         help="The parameter to pass to CMAKE_SYSTEM_NAME when"
-                              " cross-compiling. By default this is 'Linux' "
-                              "unless -arch is in the cflags, in which case "
-                              "it is 'Darwin'")
         group.add_option("", "--cppflags", type=str, action="append",
                          dest="cppflags", default=[],
                          help="Extra flags to pass the compiler in C or C++ mode. "
@@ -314,6 +334,7 @@ class TestSuiteTest(BuiltinTest):
         group.add_option("", "--use-lit", dest="lit", metavar="PATH",
                          type=str, default="llvm-lit",
                          help="Path to the LIT test runner [llvm-lit]")
+        parser.add_option_group(group)
 
         (opts, args) = parser.parse_args(args)
         self.opts = opts
@@ -325,34 +346,30 @@ class TestSuiteTest(BuiltinTest):
         else:
             parser.error("Expected no positional arguments (got: %r)" % (args,))
 
-        for a in ['cross_compiling', 'cross_compiling_system_name', 'llvm_arch']:
-            if getattr(opts, a):
-                parser.error('option "%s" is not yet implemented!' % a)
-
         if self.opts.sandbox_path is None:
             parser.error('--sandbox is required')
 
-        if self.opts.cc is None:
-            parser.error('--cc is required')
+        if self.opts.cc is not None:
+            self.opts.cc = resolve_command_path(self.opts.cc)
 
-        # Option validation.
-        opts.cc = resolve_command_path(opts.cc)
+            if not lnt.testing.util.compilers.is_valid(self.opts.cc):
+                parser.error('--cc does not point to a valid executable.')
 
-        if not lnt.testing.util.compilers.is_valid(opts.cc):
-            parser.error('--cc does not point to a valid executable.')
-
-        # If there was no --cxx given, attempt to infer it from the --cc.
-        if opts.cxx is None:
-            opts.cxx = lnt.testing.util.compilers.infer_cxx_compiler(opts.cc)
-            if opts.cxx is not None:
-                note("Inferred C++ compiler under test as: %r" % (opts.cxx,))
+            # If there was no --cxx given, attempt to infer it from the --cc.
+            if self.opts.cxx is None:
+                self.opts.cxx = \
+                    lnt.testing.util.compilers.infer_cxx_compiler(self.opts.cc)
+                if self.opts.cxx is not None:
+                    note("Inferred C++ compiler under test as: %r"
+                         % (self.opts.cxx,))
+                else:
+                    parser.error("unable to infer --cxx - set it manually.")
             else:
-                parser.error("unable to infer --cxx - set it manually.")
-        else:
-            opts.cxx = resolve_command_path(opts.cxx)
+                self.opts.cxx = resolve_command_path(self.opts.cxx)
 
-        if not os.path.exists(opts.cxx):
-            parser.error("invalid --cxx argument %r, does not exist" % (opts.cxx))
+            if not os.path.exists(self.opts.cxx):
+                parser.error("invalid --cxx argument %r, does not exist"
+                             % (self.opts.cxx))
 
         if opts.test_suite_root is None:
             parser.error('--test-suite is required')
@@ -425,6 +442,26 @@ class TestSuiteTest(BuiltinTest):
         basedir = os.path.join(self.opts.sandbox_path, build_dir_name)
         self._base_path = basedir
 
+        cmakecache = os.path.join(self._base_path, 'CMakeCache.txt')
+        self.configured = not self.opts.run_configure and \
+            os.path.exists(cmakecache)
+
+        #  If we are doing diagnostics, skip the usual run and do them now.
+        if opts.diagnose:
+            return self.diagnose()
+
+        # configure, so we can extract toolchain information from the cmake
+        # output.
+        self._configure_if_needed()
+
+        # Verify that we can actually find a compiler before continuing
+        cmake_vars = self._extract_cmake_vars_from_cache()
+        if "CMAKE_C_COMPILER" not in cmake_vars or \
+                not os.path.exists(cmake_vars["CMAKE_C_COMPILER"]):
+            parser.error(
+                "Couldn't find C compiler (%s). Maybe you should specify --cc?"
+                % cmake_vars.get("CMAKE_C_COMPILER"))
+
         # We don't support compiling without testing as we can't get compile-
         # time numbers from LIT without running the tests.
         if opts.compile_multisample > opts.exec_multisample:
@@ -434,7 +471,7 @@ class TestSuiteTest(BuiltinTest):
 
         if opts.auto_name:
             # Construct the nickname from a few key parameters.
-            cc_info = self._get_cc_info()
+            cc_info = self._get_cc_info(cmake_vars)
             cc_nick = '%s_%s' % (cc_info['cc_name'], cc_info['cc_build'])
             self.nick += "__%s__%s" % (cc_nick,
                                        cc_info['cc_target'].split('-')[0])
@@ -444,21 +481,18 @@ class TestSuiteTest(BuiltinTest):
         # is a horrible failure mode because all of our data ends up going
         # to order 0.  The user needs to give an order if we can't detect!
         if opts.run_order is None:
-            cc_info = self._get_cc_info()
+            cc_info = self._get_cc_info(cmake_vars)
             if cc_info['inferred_run_order'] == 0:
                 fatal("Cannot detect compiler version. Specify --run-order"
                       " to manually define it.")
 
-        #  If we are doing diagnostics, skip the usual run and do them now.
-        if opts.diagnose:
-            return self.diagnose()
         # Now do the actual run.
         reports = []
         json_reports = []
         for i in range(max(opts.exec_multisample, opts.compile_multisample)):
             c = i < opts.compile_multisample
             e = i < opts.exec_multisample
-            run_report, json_data = self.run(self.nick, compile=c, test=e)
+            run_report, json_data = self.run(cmake_vars, compile=c, test=e)
             reports.append(run_report)
             json_reports.append(json_data)
 
@@ -476,31 +510,39 @@ class TestSuiteTest(BuiltinTest):
         with open(xml_report_path, 'w') as fd:
             fd.write(str_template)
 
+        csv_report_path = os.path.join(self._base_path,
+                                       'test-results.csv')
+        str_template = _lit_json_to_csv(json_reports)
+        with open(csv_report_path, 'w') as fd:
+            fd.write(str_template)
+
         return self.submit(report_path, self.opts, commit=True)
 
-    def run(self, nick, compile=True, test=True):
-        path = self._base_path
-
-        if not os.path.exists(path):
-            mkdir_p(path)
-
-        if self.opts.pgo:
-            self._collect_pgo(path)
-            self.trained = True
-
-        if not self.configured and self._need_to_configure(path):
-            self._configure(path)
-            self._clean(path)
+    def _configure_if_needed(self):
+        mkdir_p(self._base_path)
+        if not self.configured:
+            self._configure(self._base_path)
+            self._clean(self._base_path)
             self.configured = True
 
+    def run(self, cmake_vars, compile=True, test=True):
+        mkdir_p(self._base_path)
+
+        if self.opts.pgo:
+            self._collect_pgo(self._base_path)
+            self.trained = True
+            self.configured = False
+
+        self._configure_if_needed()
+
         if self.compiled and compile:
-            self._clean(path)
+            self._clean(self._base_path)
         if not self.compiled or compile:
-            self._make(path)
+            self._make(self._base_path)
             self.compiled = True
 
-        data = self._lit(path, test)
-        return self._parse_lit_output(path, data), data
+        data = self._lit(self._base_path, test)
+        return self._parse_lit_output(self._base_path, data, cmake_vars), data
 
     def _create_merged_report(self, reports):
         if len(reports) == 1:
@@ -511,10 +553,6 @@ class TestSuiteTest(BuiltinTest):
         run.end_time = reports[-1].run.end_time
         test_samples = sum([r.tests for r in reports], [])
         return lnt.testing.Report(machine, run, test_samples)
-
-    def _need_to_configure(self, path):
-        cmakecache = os.path.join(path, 'CMakeCache.txt')
-        return self.opts.run_configure or not os.path.exists(cmakecache)
 
     def _test_suite_dir(self):
         return self.opts.test_suite_root
@@ -531,6 +569,14 @@ class TestSuiteTest(BuiltinTest):
             note('          (In %s)' % kwargs['cwd'])
         return subprocess.check_call(*args, **kwargs)
 
+    def _check_output(self, *args, **kwargs):
+        note('Execute: %s' % ' '.join(args[0]))
+        if 'cwd' in kwargs:
+            note('          (In %s)' % kwargs['cwd'])
+        output = subprocess.check_output(*args, **kwargs)
+        sys.stdout.write(output)
+        return output
+
     def _clean(self, path):
         make_cmd = self.opts.make
 
@@ -545,11 +591,12 @@ class TestSuiteTest(BuiltinTest):
     def _configure(self, path, extra_cmake_defs=[], execute=True):
         cmake_cmd = self.opts.cmake
 
-        defs = {
-            # FIXME: Support ARCH, SMALL/LARGE etc
-            'CMAKE_C_COMPILER': self.opts.cc,
-            'CMAKE_CXX_COMPILER': self.opts.cxx,
-        }
+        defs = {}
+        if self.opts.cc:
+            defs['CMAKE_C_COMPILER'] = self.opts.cc
+        if self.opts.cxx:
+            defs['CMAKE_CXX_COMPILER'] = self.opts.cxx
+
         if self.opts.cppflags or self.opts.cflags:
             all_cflags = ' '.join([self.opts.cppflags, self.opts.cflags])
             defs['CMAKE_C_FLAGS'] = self._unix_quote_args(all_cflags)
@@ -574,13 +621,27 @@ class TestSuiteTest(BuiltinTest):
             if 'TEST_SUITE_RUN_TYPE' not in defs:
                 defs['TEST_SUITE_RUN_TYPE'] = 'ref'
 
-        if self.opts.cmake_defines:
-            for item in self.opts.cmake_defines:
-                k, v = item.split('=', 1)
-                defs[k] = v
-        for item in extra_cmake_defs:
+        for item in self.opts.cmake_defines + extra_cmake_defs:
             k, v = item.split('=', 1)
+            # make sure the overriding of the settings above also works
+            # when the cmake-define-defined variable has a datatype
+            # specified.
+            key_no_datatype = k.split(':', 1)[0]
+            if key_no_datatype in defs:
+                del defs[key_no_datatype]
             defs[k] = v
+
+        # We use 'cmake -LAH -N' later to find out the value of the
+        # CMAKE_C_COMPILER and CMAKE_CXX_COMPILER variables.
+        # 'cmake -LAH -N' will only return variables in the cache that have
+        # a cmake type set. Therefore, explicitly set a 'FILEPATH' type on
+        # these variables here, if they were untyped so far.
+        if 'CMAKE_C_COMPILER' in defs:
+            defs['CMAKE_C_COMPILER:FILEPATH'] = defs['CMAKE_C_COMPILER']
+            del defs['CMAKE_C_COMPILER']
+        if 'CMAKE_CXX_COMPILER' in defs:
+            defs['CMAKE_CXX_COMPILER:FILEPATH'] = defs['CMAKE_CXX_COMPILER']
+            del defs['CMAKE_CXX_COMPILER']
 
         lines = ['Configuring with {']
         for k, v in sorted(defs.items()):
@@ -631,9 +692,15 @@ class TestSuiteTest(BuiltinTest):
             args = ["VERBOSE=1", target]
         else:
             args = [target]
-        self._check_call([make_cmd,
-                          '-j', str(self._build_threads())] + args,
-                         cwd=subdir)
+        try:
+            self._check_call([make_cmd,
+                              '-k', '-j', str(self._build_threads())] + args,
+                             cwd=subdir)
+        except subprocess.CalledProcessError:
+            # make is expected to exit with code 1 if there was any build
+            # failure. Build failures are not unexpected when testing an
+            # experimental compiler.
+            pass
 
     def _lit(self, path, test):
         lit_cmd = self.opts.lit
@@ -684,14 +751,55 @@ class TestSuiteTest(BuiltinTest):
         name = raw_name.rsplit('.test', 1)[0]
         return not os.path.exists(os.path.join(path, name))
 
-    def _get_target_flags(self):
-        return shlex.split(self.opts.cppflags + self.opts.cflags)
+    def _extract_cmake_vars_from_cache(self):
+        assert self.configured is True
+        cmake_lah_output = self._check_output(
+            [self.opts.cmake] + ['-LAH', '-N'] + [self._base_path])
+        pattern2var = [
+            (re.compile("^%s:[^=]*=(.*)$" % cmakevar), cmakevar)
+            for cmakevar in (
+                "CMAKE_C_COMPILER",
+                "CMAKE_BUILD_TYPE",
+                "CMAKE_CXX_FLAGS",
+                "CMAKE_CXX_FLAGS_DEBUG",
+                "CMAKE_CXX_FLAGS_MINSIZEREL",
+                "CMAKE_CXX_FLAGS_RELEASE",
+                "CMAKE_CXX_FLAGS_RELWITHDEBINFO",
+                "CMAKE_C_FLAGS",
+                "CMAKE_C_FLAGS_DEBUG",
+                "CMAKE_C_FLAGS_MINSIZEREL",
+                "CMAKE_C_FLAGS_RELEASE",
+                "CMAKE_C_FLAGS_RELWITHDEBINFO",
+                "CMAKE_C_COMPILER_TARGET",
+                "CMAKE_CXX_COMPILER_TARGET",
+                )]
+        cmake_vars = {}
+        for line in cmake_lah_output.split("\n"):
+            for pattern, varname in pattern2var:
+                m = re.match(pattern, line)
+                if m:
+                    cmake_vars[varname] = m.group(1)
+        return cmake_vars
 
-    def _get_cc_info(self):
-        return lnt.testing.util.compilers.get_cc_info(self.opts.cc,
-                                                      self._get_target_flags())
+    def _get_cc_info(self, cmake_vars):
+        build_type = cmake_vars["CMAKE_BUILD_TYPE"]
+        cflags = cmake_vars["CMAKE_C_FLAGS"]
+        if build_type != "":
+            cflags = \
+                " ".join(cflags.split(" ") +
+                         cmake_vars["CMAKE_C_FLAGS_" + build_type.upper()]
+                         .split(" "))
+        # FIXME: this probably needs to be conditionalized on the compiler
+        # being clang. Or maybe we need an
+        # lnt.testing.util.compilers.get_cc_info uses cmake somehow?
+        if "CMAKE_C_COMPILER_TARGET" in cmake_vars:
+            cflags += " --target=" + cmake_vars["CMAKE_C_COMPILER_TARGET"]
+        target_flags = shlex.split(cflags)
 
-    def _parse_lit_output(self, path, data, only_test=False):
+        return lnt.testing.util.compilers.get_cc_info(
+            cmake_vars["CMAKE_C_COMPILER"], target_flags)
+
+    def _parse_lit_output(self, path, data, cmake_vars, only_test=False):
         LIT_METRIC_TO_LNT = {
             'compile_time': 'compile',
             'exec_time': 'exec',
@@ -796,7 +904,7 @@ class TestSuiteTest(BuiltinTest):
         run_info = {
             'tag': 'nts'
         }
-        run_info.update(self._get_cc_info())
+        run_info.update(self._get_cc_info(cmake_vars))
         run_info['run_order'] = run_info['inferred_run_order']
         if self.opts.run_order:
             run_info['run_order'] = self.opts.run_order
@@ -841,8 +949,7 @@ class TestSuiteTest(BuiltinTest):
         os.mkdir(report_path)
 
         path = self._base_path
-        if not os.path.exists(path):
-            mkdir_p(path)
+        mkdir_p(path)
         os.chdir(path)
 
         # Run with -save-temps

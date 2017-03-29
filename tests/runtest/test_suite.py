@@ -2,7 +2,7 @@
 #
 # RUN: rm -rf  %t.SANDBOX  %t.SANDBOX2 || true
 #
-# Check a basic nt run.
+# Check a basic test-suite run.
 # RUN: lnt runtest test-suite \
 # RUN:     --sandbox %t.SANDBOX \
 # RUN:     --no-timestamp \
@@ -16,6 +16,7 @@
 # RUN: FileCheck  --check-prefix CHECK-BASIC < %t.err %s
 # RUN: FileCheck  --check-prefix CHECK-REPORT < %t.SANDBOX/build/report.json %s
 # RUN: FileCheck  --check-prefix CHECK-XML < %t.SANDBOX/build/test-results.xunit.xml %s
+# RUN: FileCheck  --check-prefix CHECK-CSV < %t.SANDBOX/build/test-results.csv %s
 
 # CHECK-REPORT: "run_order": "154331"
 # CHECK-REPORT: "Name": "nts.{{[^.]+}}.compile"
@@ -43,6 +44,9 @@
 # CHECK-XML:               name="foo" time="1.0">
 # CHECK-XML:     </testcase>
 # CHECK-XML: </testsuite>
+
+# CHECK-CSV: Program;CC;CC_Time;CC_Hash;Exec;Exec_Time;Score
+# CHECK-CSV-NEXT: foo//foo;pass;1.3;xyz;pass;1.4;1.5
 
 # Use the same sandbox again with --no-configure
 # RUN: lnt runtest test-suite \
@@ -243,7 +247,7 @@
 # CHECK-ONLYTEST: Configuring with {
 # CHECK-ONLYTEST:   one: 'two'
 # CHECK-ONLYTEST:   three: 'four'
-# CHECK-ONLYTEST: Execute: {{.*}}/fake-make -j 1 VERBOSE=1 subtest
+# CHECK-ONLYTEST: Execute: {{.*}}/fake-make -k -j 1 VERBOSE=1 subtest
 
 # Check --benchmarking-only
 # RUN: lnt runtest test-suite \
@@ -374,7 +378,37 @@
 # RUN:     --use-lit %S/Inputs/test-suite-cmake/fake-lit \
 # RUN:     > %t.log 2> %t.err || true
 # RUN: FileCheck  --check-prefix CHECK-MISSING-CC < %t.err %s
-# CHECK-MISSING-CC: error: --cc is required
+# CHECK-MISSING-CC: error: Couldn't find C compiler (). Maybe you should specify --cc?
+
+# Check on conflicting -cc and -cmake-define=CMAKE_C_COMPILER
+# options, the right compiler gets stored in the json report
+# RUN: lnt runtest test-suite \
+# RUN:     --sandbox %t.SANDBOX \
+# RUN:     --no-timestamp \
+# RUN:     --test-suite %S/Inputs/test-suite-cmake \
+# RUN:     --cmake-define=CMAKE_C_COMPILER:STRING=%{shared_inputs}/FakeCompilers/clang-r154332 \
+# RUN:     --cc %{shared_inputs}/FakeCompilers/clang-r154331 \
+# RUN:     --use-cmake %S/Inputs/test-suite-cmake/fake-cmake \
+# RUN:     --use-make %S/Inputs/test-suite-cmake/fake-make \
+# RUN:     --use-lit %S/Inputs/test-suite-cmake/fake-lit \
+# RUN:     > %t.log 2> %t.err || true
+# RUN: FileCheck --check-prefix CHECK-CC-CONFL-CMAKEDEFINE < %t.SANDBOX/build/report.json %s
+# CHECK-CC-CONFL-CMAKEDEFINE: "run_order": "154332"
+
+# Check that while cross-compiling, the target architecture is recognized
+# correctly.
+# RUN: lnt runtest test-suite \
+# RUN:     --sandbox %t.SANDBOX \
+# RUN:     --no-timestamp \
+# RUN:     --test-suite %S/Inputs/test-suite-cmake \
+# RUN:     --cmake-define=CMAKE_C_COMPILER_TARGET:STRING=targetarch-linux-gnu \
+# RUN:     --cc %{shared_inputs}/FakeCompilers/clang-r154331 \
+# RUN:     --use-cmake %S/Inputs/test-suite-cmake/fake-cmake \
+# RUN:     --use-make %S/Inputs/test-suite-cmake/fake-make \
+# RUN:     --use-lit %S/Inputs/test-suite-cmake/fake-lit \
+# RUN:     > %t.log 2> %t.err || true
+# RUN: FileCheck --check-prefix CHECK-CROSS-TARGET < %t.SANDBOX/build/report.json %s
+# CHECK-CROSS-TARGET: "cc_target": "targetarch-linux-gnu"
 
 # Check running with PGO
 # RUN: lnt runtest test-suite \

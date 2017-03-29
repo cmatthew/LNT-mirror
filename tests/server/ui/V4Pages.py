@@ -15,7 +15,7 @@ import re
 import sys
 import xml.etree.ElementTree as ET
 from htmlentitydefs import name2codepoint
-
+from flask import session
 import lnt.server.db.migrate
 import lnt.server.ui.app
 import json
@@ -24,17 +24,20 @@ logging.basicConfig(level=logging.DEBUG)
 
 HTTP_BAD_REQUEST = 400
 HTTP_NOT_FOUND = 404
+HTTP_REDIRECT = 302
+HTTP_OK = 200
 
 
-def check_code(client, url, expected_code=200, data_to_send=None):
+def check_code(client, url, expected_code=HTTP_OK, data_to_send=None):
     """Call a flask url, and make sure the return code is good."""
     resp = client.get(url, follow_redirects=False, data=data_to_send)
     assert resp.status_code == expected_code, \
-        "Call to %s returned: %d, not the expected %d"%(url, resp.status_code, expected_code)
+        "Call to %s returned: %d, not the expected %d" % (url, resp.status_code,
+                                                          expected_code)
     return resp
 
 
-def check_json(client, url, expected_code=200, data_to_send=None):
+def check_json(client, url, expected_code=HTTP_OK, data_to_send=None):
     """Call a flask url, make sure the return code is good,
     and grab reply data from the json payload."""
     return json.loads(check_code(client, url, expected_code,
@@ -44,8 +47,9 @@ def check_json(client, url, expected_code=200, data_to_send=None):
 def check_redirect(client, url, expected_redirect_regex):
     """Check the client returns the expected redirect on this URL."""
     resp = client.get(url, follow_redirects=False)
-    assert resp.status_code == 302, \
-        "Call to %s returned: %d, not the expected %d"%(url, resp.status_code, 302)
+    assert resp.status_code == HTTP_REDIRECT, \
+        "Call to %s returned: %d, not the expected %d" % (url, resp.status_code,
+                                                          HTTP_REDIRECT)
     regex = re.compile(expected_redirect_regex)
     assert regex.search(resp.location), \
         "Call to %s redirects to: %s, not matching the expected regex %s" \
@@ -56,6 +60,7 @@ def check_redirect(client, url, expected_redirect_regex):
 def dump_html(html_string):
    for linenr, line in enumerate(html_string.split('\n')):
       print "%4d:%s" % (linenr+1, line)
+
 
 def get_xml_tree(html_string):
     try:
@@ -200,13 +205,14 @@ def main():
 
     # Don't catch out exceptions.
     app.testing = True
+    app.config['WTF_CSRF_ENABLED'] = False
 
     # Create a test client.
     client = app.test_client()
 
     # Fetch the index page.
     check_code(client, '/')
-    
+
     # Rules the index page.
     check_code(client, '/rules')
 
@@ -227,6 +233,41 @@ def main():
     check_code(client, '/v4/nts/order/3')
     # Check invalid order gives error.
     check_code(client, '/v4/nts/order/9999', expected_code=HTTP_NOT_FOUND)
+
+    # Check that we can promote a baseline, then demote.
+    form_data = dict(name="foo_baseline",
+                     description="foo_descrimport iption",
+                     prmote=True)
+    r = client.post('/v4/nts/order/3', data=form_data)
+    # We should redirect to the last page and flash.
+    assert r.status_code == HTTP_REDIRECT
+
+    # Try with redirect.
+    r = client.post('/v4/nts/order/3',
+                    data=form_data,
+                    follow_redirects=True)
+    assert r.status_code == HTTP_OK
+    # Should see baseline displayed in page body.
+    assert "Baseline - foo_baseline" in r.data
+
+    # Now demote it.
+    data2 = dict(name="foo_baseline",
+                 description="foo_description",
+                 update=False,
+                 promote=False,
+                 demote=True)
+    r = client.post('/v4/nts/order/3', data=data2, follow_redirects=True)
+    assert r.status_code == HTTP_OK
+    # Baseline should no longer be shown in page baseline.
+    assert "Baseline - foo_baseline" not in r.data
+
+    # Leave a baseline in place for the rest of the tests.
+    client.post('/v4/nts/order/3', data=form_data)
+
+    check_code(client, '/v4/nts/set_baseline/1', expected_code=HTTP_REDIRECT)
+    with app.test_client() as c:
+        c.get('/v4/nts/set_baseline/1')
+        session.get('baseline') == 1
 
     # Get a run result page (and associated views).
     check_code(client, '/v4/nts/1')
@@ -267,7 +308,7 @@ def main():
                expected_code=HTTP_NOT_FOUND)
     #  Check baselines work.
     check_code(client, '/v4/nts/graph?plot.0=1.3.2&baseline.60=3')
-    
+
     # Check some variations of the daily report work.
     check_code(client, '/v4/nts/daily_report/2012/4/12')
     check_code(client, '/v4/nts/daily_report/2012/4/11')
@@ -424,18 +465,21 @@ def main():
     # Check some variations of the daily report work.
     check_code(client, '/v4/compile/daily_report/2014/6/5?day_start=16')
     check_code(client, '/v4/compile/daily_report/2014/6/4')
-    
+
     check_redirect(client, '/v4/nts/regressions/new_from_graph/1/1/1/1', '/v4/nts/regressions/1')
     check_code(client, '/v4/nts/regressions/')
     check_code(client, '/v4/nts/regressions/?machine_filter=machine2')
     check_code(client, '/v4/nts/regressions/?machine_filter=machine0')
 
     check_code(client, '/v4/nts/regressions/1')
-    
-    check_json(client, '/v4/nts/regressions/1?json=True')
-    
-    
 
+    check_json(client, '/v4/nts/regressions/1?json=True')
+
+    # Make sure the new option does not break anything
+    check_code(client, '/db_default/v4/nts/graph?switch_min_mean=yes&plot.0=1.3.2&submit=Update')
+    check_json(client, '/db_default/v4/nts/graph?switch_min_mean=yes&plot.0=1.3.2&json=true&submit=Update')
+    check_code(client, '/db_default/v4/nts/graph?switch_min_mean=yes&plot.0=1.3.2')
+    check_json(client, '/db_default/v4/nts/graph?switch_min_mean=yes&plot.0=1.3.2&json=true')
 
 if __name__ == '__main__':
     main()

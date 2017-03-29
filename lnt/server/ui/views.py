@@ -5,8 +5,10 @@ import tempfile
 import time
 import copy
 import json
+from typing import List, Optional
 
 import flask
+from flask import session
 from flask import abort
 from flask import current_app
 from flask import g
@@ -16,13 +18,15 @@ from flask import render_template
 from flask import request
 from flask import url_for
 from flask import flash
-from lnt.server.ui.util import FLASH_DANGER
+
+from lnt.server.ui.util import FLASH_DANGER, FLASH_SUCCESS
 from lnt.testing.util.commands import warning, error, note
 import sqlalchemy.sql
 from sqlalchemy.orm.exc import NoResultFound
 
 from flask_wtf import Form
-from wtforms import SelectField
+from wtforms import SelectField, StringField, SubmitField
+from wtforms.validators import DataRequired, Length
 
 import lnt.util
 import lnt.util.ImportData
@@ -41,7 +45,26 @@ import lnt.server.db.search
 from lnt.server.ui.regression_views import PrecomputedCR
 from collections import namedtuple, defaultdict
 from lnt.util import async_ops
+from urlparse import urlparse, urljoin
+from flask import request, url_for
+
 integral_rex = re.compile(r"[\d]+")
+
+
+# http://flask.pocoo.org/snippets/62/
+def is_safe_url(target):
+    ref_url = urlparse(request.host_url)
+    test_url = urlparse(urljoin(request.host_url, target))
+    return test_url.scheme in ('http', 'https') and \
+        ref_url.netloc == test_url.netloc
+
+
+def get_redirect_target():
+    for target in request.values.get('next'), request.referrer:
+        if not target:
+            continue
+        if is_safe_url(target):
+            return target
 
 ###
 # Root-Only Routes
@@ -172,7 +195,8 @@ def v4_recent_activity():
     return render_template("v4_recent_activity.html",
                            testsuite_name=g.testsuite_name,
                            active_machines=active_machines,
-                           active_submissions=active_submissions)
+                           active_submissions=active_submissions,
+                           ts=ts)
 
 @v4_route("/machine/")
 def v4_machines():
@@ -220,7 +244,7 @@ def v4_machine(id):
                            associated_runs=associated_runs)
     except NoResultFound as e:
         abort(404)
-        
+
 class V4RequestInfo(object):
     def __init__(self, run_id, only_html_body=True):
         self.db = request.get_db()
@@ -243,8 +267,8 @@ class V4RequestInfo(object):
         self.confidence_lv = confidence_lv
 
         # Find the neighboring runs, by order.
-        prev_runs = list(ts.get_previous_runs_on_machine(run, N = 3))
-        next_runs = list(ts.get_next_runs_on_machine(run, N = 3))
+        prev_runs = list(ts.get_previous_runs_on_machine(run, N=3))
+        next_runs = list(ts.get_next_runs_on_machine(run, N=3))
         self.neighboring_runs = next_runs[::-1] + [self.run] + prev_runs
 
         # Select the comparison run as either the previous run, or a user
@@ -255,13 +279,13 @@ class V4RequestInfo(object):
             self.compare_to = ts.query(ts.Run).\
                 filter_by(id=compare_to_id).first()
             if self.compare_to is None:
-                # FIXME: Need better way to report this error.
-                abort(404)
-
-            self.comparison_neighboring_runs = (
-                list(ts.get_next_runs_on_machine(self.compare_to, N=3))[::-1] +
-                [self.compare_to] +
-                list(ts.get_previous_runs_on_machine(self.compare_to, N=3)))
+                flash("Comparison Run is invalid: " + compare_to_str,
+                      FLASH_DANGER)
+            else:
+                self.comparison_neighboring_runs = (
+                    list(ts.get_next_runs_on_machine(self.compare_to, N=3))[::-1] +
+                    [self.compare_to] +
+                    list(ts.get_previous_runs_on_machine(self.compare_to, N=3)))
         else:
             if prev_runs:
                 self.compare_to = prev_runs[0]
@@ -282,8 +306,7 @@ class V4RequestInfo(object):
             self.baseline = ts.query(ts.Run).\
                 filter_by(id=baseline_id).first()
             if self.baseline is None:
-                # FIXME: Need better way to report this error.
-                abort(404)
+                flash("Could not find baseline " + baseline_str, FLASH_DANGER)
         else:
             self.baseline = None
 
@@ -302,7 +325,7 @@ class V4RequestInfo(object):
         classes = {
             'table': 'table table-striped table-condensed table-hover'
         }
-        
+
         reports = lnt.server.reporting.runs.generate_run_report(
             self.run, baseurl=db_url_for('index', _external=True),
             only_html_body=only_html_body, result=None,
@@ -354,6 +377,7 @@ Invalid URL for version %r database.""" % (g.db_info.db_version,))
     return render_template("error.html", message="""\
 Unable to find a v0.4 run for this ID. Please use the native v0.4 URL interface
 (instead of the /simple/... URL schema).""")
+
 
 @v4_route("/<int:id>")
 def v4_run(id):
@@ -436,17 +460,76 @@ def v4_run(id):
         request_info=info, urls=urls
 )
 
-@v4_route("/order/<int:id>")
+
+class PromoteOrderToBaseline(Form):
+    name = StringField('Name', validators=[DataRequired(), Length(max=32)])
+    description = StringField('Description', validators=[Length(max=256)])
+    promote = SubmitField('Promote')
+    update = SubmitField('Update')
+    demote = SubmitField('Demote')
+
+
+@v4_route("/order/<int:id>", methods=['GET', 'POST'])
 def v4_order(id):
-    # Get the testsuite.
+    """Order page details order information, as well as runs that are in this
+    order as well setting this run as a baseline."""
     ts = request.get_testsuite()
+    form = PromoteOrderToBaseline()
+
+    if form.validate_on_submit():
+        try:
+            baseline = ts.query(ts.Baseline) \
+                .filter(ts.Baseline.order_id == id) \
+                .one()
+        except NoResultFound:
+            baseline = ts.Baseline()
+
+        if form.demote.data:
+            ts.session.delete(baseline)
+            ts.session.commit()
+
+            flash("Baseline demoted.", FLASH_SUCCESS)
+        else:
+            baseline.name = form.name.data
+            baseline.comment = form.description.data
+            baseline.order_id = id
+            ts.session.add(baseline)
+            ts.session.commit()
+
+            flash("Baseline {} updated.".format(baseline.name), FLASH_SUCCESS )
+        return redirect(v4_url_for("v4_order", id=id))
+    else:
+        print form.errors
+
+    try:
+        baseline = ts.query(ts.Baseline) \
+            .filter(ts.Baseline.order_id == id) \
+            .one()
+        form.name.data = baseline.name
+        form.description.data = baseline.comment
+    except NoResultFound:
+        pass
 
     # Get the order.
     order = ts.query(ts.Order).filter(ts.Order.id == id).first()
     if order is None:
         abort(404)
 
-    return render_template("v4_order.html", ts=ts, order=order)
+    return render_template("v4_order.html", ts=ts, order=order, form=form)
+
+
+@v4_route("/set_baseline/<int:id>")
+def v4_set_baseline(id):
+    """Update the baseline stored in the user's session."""
+    ts = request.get_testsuite()
+    base = ts.query(ts.Baseline).get(id)
+    if not base:
+        return abort(404)
+    flash("Baseline set to " + base.name, FLASH_SUCCESS)
+    session['baseline'] = id
+
+    return redirect(get_redirect_target())
+
 
 @v4_route("/all_orders")
 def v4_all_orders():
@@ -505,9 +588,25 @@ def v4_graph():
     from lnt.external.stats import stats as ext_stats
 
     ts = request.get_testsuite()
+    switch_min_mean_local = False
 
+    if 'switch_min_mean_session' not in session:
+        session['switch_min_mean_session'] = False
     # Parse the view options.
-    options = {}
+    options = {'min_mean_checkbox': 'min()'}
+    if 'submit' in request.args:  # user pressed a button
+        if 'switch_min_mean' in request.args:  # user checked mean() checkbox
+            session['switch_min_mean_session'] = options['switch_min_mean'] = \
+                bool(request.args.get('switch_min_mean'))
+            switch_min_mean_local = session['switch_min_mean_session']
+        else:  # mean() check box is not checked
+            session['switch_min_mean_session'] = options['switch_min_mean'] = \
+                bool(request.args.get('switch_min_mean'))
+            switch_min_mean_local = session['switch_min_mean_session']
+    else:  # new page was loaded by clicking link, not submit button
+        options['switch_min_mean'] = switch_min_mean_local = \
+            session['switch_min_mean_session']
+
     options['hide_lineplot'] = bool(request.args.get('hide_lineplot'))
     show_lineplot = not options['hide_lineplot']
     options['show_mad'] = show_mad = bool(request.args.get('show_mad'))
@@ -769,8 +868,12 @@ def v4_graph():
 
             values = [v*normalize_by for v in data]
             aggregation_fn = min
+
+            if switch_min_mean_local:
+                aggregation_fn = lnt.util.stats.agg_mean
             if field.bigger_is_better:
                 aggregation_fn = max
+
             agg_value, agg_index = \
                 aggregation_fn((value, index)
                                for (index, value) in enumerate(values))
@@ -780,7 +883,7 @@ def v4_graph():
             metadata["date"] = str(dates[agg_index])
             if runs:
                 metadata["runID"] = str(runs[agg_index])
-            
+
             if len(graph_datum) > 1:
                 # If there are more than one plot in the graph, also label the
                 # test name.
@@ -795,7 +898,7 @@ def v4_graph():
                     point_metadata = dict(metadata)
                     point_metadata["date"] = str(dates[i])
                     points_data.append((x, v, point_metadata))
-            
+
             # Add the standard deviation error bar, if requested.
             if show_stddev:
                 mean = stats.mean(values)
@@ -1234,7 +1337,7 @@ def health():
     if queue_length > 10:
         explode = True
         msg = "Queue too long."
-    
+
     import resource
     stats = resource.getrusage(resource.RUSAGE_SELF)
     mem = stats.ru_maxrss
@@ -1274,6 +1377,7 @@ class MatrixDataRequest(object):
         self.machine = machine
         self.test = test
         self.field = field
+
     def __repr__(self):
         return "{}:{}({} samples)" \
             .format(self.machine.name,
@@ -1287,8 +1391,25 @@ MATRIX_LIMITS = [('12', 'Small'),
                  ('250', 'Large'),
                  ('-1', 'All')]
 
+
 class MatrixOptions(Form):
     limit = SelectField('Size', choices=MATRIX_LIMITS)
+
+
+def baseline():
+    # type: () -> Optional[testsuitedb.Baseline]
+    """Get the baseline object from the user's current session baseline value
+    or None if one is not defined.
+    """
+    ts = request.get_testsuite()
+    base_id = session.get('baseline')
+    if not base_id:
+        return None
+    try:
+        base = ts.query(ts.Baseline).get(base_id)
+    except NoResultFound:
+        return None
+    return base
 
 
 @v4_route("/matrix", methods=['GET', 'POST'])
@@ -1299,7 +1420,7 @@ def v4_matrix():
     for each dataset to add, there will be a "plot.n=.m.b.f" where m is machine
     ID, b is benchmark ID and f os field kind offset. "n" is used to unique
     the paramters, and is ignored.
-    
+
     """
     ts = request.get_testsuite()
     # Load the matrix request parameters.
@@ -1308,7 +1429,7 @@ def v4_matrix():
         post_limit = form.limit.data
     else:
         post_limit = MATRIX_LIMITS[0][0]
-    data_parameters = []
+    data_parameters = []  # type: List[MatrixDataRequest]
     for name, value in request.args.items():
         #  plot.<unused>=<machine id>.<test id>.<field index>
         if not name.startswith(str('plot.')):
@@ -1346,7 +1467,6 @@ def v4_matrix():
 
     if not data_parameters:
         abort(404, "Request requires some data arguments.")
-
     # Feature: if all of the results are from the same machine, hide the name to
     # make the headers more compact.
     dedup = True
@@ -1379,9 +1499,9 @@ def v4_matrix():
             limit = int(limit)
             if limit != -1:
                 q = q.limit(limit)
-            
+
         req.samples = defaultdict(list)
-        
+
         for s in q.all():
             req.samples[s[1]].append(s[0])
             all_orders.add(s[1])
@@ -1392,12 +1512,15 @@ def v4_matrix():
     if not all_orders:
         abort(404, "No data found.")
     # Now grab the baseline data.
-    baseline_rev = machine.DEFAULT_BASELINE_REVISION
+    user_baseline = baseline()
     backup_baseline = next(iter(all_orders))
-    if baseline_rev:
-        all_orders.add(baseline_rev)
+    if user_baseline:
+        all_orders.add(user_baseline.order.llvm_project_revision)
+        baseline_rev = user_baseline.order.llvm_project_revision
+        baseline_name = user_baseline.name
     else:
         baseline_rev = backup_baseline
+        baseline_name = backup_baseline
 
     for req in data_parameters:
         q_baseline = ts.query(req.field.column, ts.Order.llvm_project_revision, ts.Order.id) \
@@ -1416,11 +1539,11 @@ def v4_matrix():
         else:
             # Well, there is a baseline, but we did not find data for it...
             # So lets revert back to the first run.
-            print "Did not find baseline, switching to", backup_baseline
-            msg = "Did not find data for baseline {}. Switching to {}."
-            flash(msg.format(baseline_rev, backup_baseline), FLASH_DANGER)
+            msg = "Did not find data for {}. Showing {}."
+            flash(msg.format(user_baseline, backup_baseline), FLASH_DANGER)
             all_orders.remove(baseline_rev)
             baseline_rev = backup_baseline
+            baseline_name = backup_baseline
 
     all_orders = list(all_orders)
     all_orders.sort(reverse=True)
@@ -1484,7 +1607,7 @@ def v4_matrix():
         show_mad = False
         show_all_samples = False
         show_sample_counts = False
-        
+
     return render_template("v4_matrix.html",
                            testsuite_name=g.testsuite_name,
                            associated_runs=data_parameters,
@@ -1495,6 +1618,7 @@ def v4_matrix():
                            order_to_id=order_to_id,
                            form=form,
                            baseline_rev=baseline_rev,
+                           baseline_name=baseline_name,
                            machine_name_common=machine_name_common,
                            machine_id_common=machine_id_common,
                            order_to_date=order_to_date)

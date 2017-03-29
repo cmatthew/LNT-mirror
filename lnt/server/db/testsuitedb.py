@@ -10,6 +10,7 @@ import json
 import os
 
 import sqlalchemy
+from flask import session
 from sqlalchemy import *
 
 import testsuite
@@ -67,6 +68,7 @@ class TestSuiteDB(object):
                 return setattr(self, field.name, value)
 
         db_key_name = self.test_suite.db_key_name
+
         class Machine(self.base, ParameterizedMixin):
             __tablename__ = db_key_name + '_Machine'
 
@@ -86,14 +88,14 @@ class TestSuiteDB(object):
             class_dict = locals()
             for item in fields:
                 if item.name in class_dict:
-                    raise ValueError,"test suite defines reserved key %r" % (
-                        name,)
+                    raise ValueError("test suite defines reserved key %r" % (
+                        name))
 
                 class_dict[item.name] = item.column = Column(
                     item.name, String(256))
 
-            def __init__(self, name):
-                self.name = name
+            def __init__(self, name_value):
+                self.name = name_value
 
             def __repr__(self):
                 return '%s_%s%r' % (db_key_name, self.__class__.__name__,
@@ -109,27 +111,27 @@ class TestSuiteDB(object):
                 self.parameters_data = json.dumps(sorted(data.items()))
             
             def get_baseline_run(self):
-                baseline = Machine.DEFAULT_BASELINE_REVISION
-                return self.get_closest_previously_reported_run(baseline)
-            
-            def get_closest_previously_reported_run(self, revision):
+                ts = Machine.testsuite
+                user_baseline = ts.get_users_baseline()
+                if user_baseline:
+                    return self.get_closest_previously_reported_run(
+                        user_baseline.order)
+                else:
+                    mach_base = Machine.DEFAULT_BASELINE_REVISION
+                    # If we have an int, convert it to a proper string.
+                    if isinstance(mach_base, int):
+                        mach_base = '% 7d' % mach_base
+                    return self.get_closest_previously_reported_run(
+                        ts.Order(llvm_project_revision=mach_base))
+
+            def get_closest_previously_reported_run(self, order_to_find):
                 """
                 Find the closest previous run to the requested order, for which
                 this machine also reported.
                 """
                 
-                # FIXME: Scalability! Pretty fast in practice, but
-                # still pretty lame.
-                
+                # FIXME: Scalability! Pretty fast in practice, but still.
                 ts = Machine.testsuite
-                
-                # If we have an int, convert it to a proper string.
-                if isinstance(revision, int):
-                    revision = '% 7d' % revision
-
-                # Grab order for revision.
-                order_to_find = ts.Order(llvm_project_revision = revision)
-
                 # Search for best order.
                 best_order = None
                 for order in ts.query(ts.Order).\
@@ -162,7 +164,6 @@ class TestSuiteDB(object):
             fields = sorted(self.order_fields,
                             key = lambda of: of.ordinal)
 
-
             id = Column("ID", Integer, primary_key=True)
 
             # Define two common columns which are used to store the previous and
@@ -185,8 +186,8 @@ class TestSuiteDB(object):
             class_dict = locals()
             for item in self.order_fields:
                 if item.name in class_dict:
-                    raise ValueError,"test suite defines reserved key %r" % (
-                        name,)
+                    raise ValueError("test suite defines reserved key %r" % (
+                        name,))
 
                 class_dict[item.name] = item.column = Column(
                     item.name, String(256))
@@ -590,6 +591,21 @@ class TestSuiteDB(object):
                 return '%s_%s%r' % (db_key_name, self.__class__.__name__,(
                                     self.id, self.field_change))
 
+        class Baseline(self.base, ParameterizedMixin):
+            """Baselines to compare runs to."""
+            __tablename__ = db_key_name + '_Baseline'
+
+            id = Column("ID", Integer, primary_key=True)
+            name = Column("Name", String(32), unique=True)
+            comment = Column("Comment", String(256))
+            order_id = Column("OrderID", Integer,
+                              ForeignKey("%s_Order.ID" % db_key_name),
+                              index=True)
+            order = sqlalchemy.orm.relation(Order)
+
+            def __str__(self):
+                return "Baseline({})".format(self.name)
+
         self.Machine = Machine
         self.Run = Run
         self.Test = Test
@@ -600,6 +616,7 @@ class TestSuiteDB(object):
         self.Regression = Regression
         self.RegressionIndicator = RegressionIndicator
         self.ChangeIgnore = ChangeIgnore
+        self.Baseline = Baseline
 
         # Create the compound index we cannot declare inline.
         sqlalchemy.schema.Index("ix_%s_Sample_RunID_TestID" % db_key_name,
@@ -619,6 +636,21 @@ class TestSuiteDB(object):
         self.commit = self.v4db.commit
         self.query = self.v4db.query
         self.rollback = self.v4db.rollback
+
+    def get_baselines(self):
+        return self.query(self.Baseline).all()
+
+    def get_users_baseline(self):
+        try:
+            session_baseline = session.get('baseline')
+        except RuntimeError:
+            # Sometimes this is called from outside the app context.
+            # In that case, don't get the user's session baseline.
+            return None
+        if session_baseline:
+            return self.query(self.Baseline).get(session_baseline)
+
+        return None
 
     def _getOrCreateMachine(self, machine_data):
         """

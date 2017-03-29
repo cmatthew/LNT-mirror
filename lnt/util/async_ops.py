@@ -42,7 +42,7 @@ def launch_workers():
         except RuntimeError:
             #  It might be the case that we are not running in the app.
             #  In this case, don't bother memory logging, stdout should
-            #  sufficent for console mode.
+            #  sufficient for console mode.
             pass
 
 
@@ -99,6 +99,9 @@ def async_run_job(job, db_name, ts, func_args):
             'db': db_name}
     job = Process(target=async_wrapper,
                   args=[job, args, func_args])
+
+    # Set this to make sure when parent dies, children are killed.
+    job.daemon = True
 
     job.start()
     JOBS.append(job)
