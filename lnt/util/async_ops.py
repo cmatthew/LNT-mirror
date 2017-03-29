@@ -47,6 +47,7 @@ def launch_workers():
 
 
 def sigHandler(signo, frame):
+    cleanup()
     sys.exit(0)
 
 
@@ -55,7 +56,11 @@ def cleanup():
     for p in JOBS:
         note("Waiting for %s %s" % (p.name, p.pid))
         if p.is_alive:
-            p.join()
+            p.join(10)
+    #  Some jobs may not have responded. Kill them!
+    for p in JOBS:
+        note("Waited, now killing for %s %s" % (p.name, p.pid))
+        p.terminate()
 
 
 atexit.register(cleanup)
