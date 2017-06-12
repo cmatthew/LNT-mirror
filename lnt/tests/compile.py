@@ -54,7 +54,7 @@ def runN(args, N, cwd, preprocess_cmd=None, env=None, sample_mem=False,
     memory sampling process out into something we can setuid? Eek.
     """
     g_log.info("preprocess_cmd at top of runN: %s:", preprocess_cmd)
-    cmd = ['runN', '-a']
+    cmd = [opts.runn, '-a']
     if sample_mem:
         cmd = ['sudo'] + cmd + ['-m']
     if preprocess_cmd is not None:
@@ -311,8 +311,10 @@ def test_build(base_name, run_info, variables, project, build_config, num_jobs,
         commands.mkdir_p(source_path)
         g_log.info('extracting sources for %r' % name)
 
-        if archive_path[-6:] == "tar.gz":
-            p = subprocess.Popen(args=['tar', '-xzf', archive_path],
+        if archive_path.endswith(".tar.gz") or \
+           archive_path.endswith(".tar.bz2") or \
+           archive_path.endswith(".tar.lzma"):
+            p = subprocess.Popen(args=['tar', '-xf', archive_path],
                                  stdin=None,
                                  stdout=subprocess.PIPE,
                                  stderr=subprocess.PIPE,
@@ -382,6 +384,7 @@ def test_build(base_name, run_info, variables, project, build_config, num_jobs,
         elif build_info['style'] == 'xcode-workspace':
             cmd.extend(('-scheme', build_info['scheme'],
                         '-workspace', file_path))
+            cmd.extend(('-derivedDataPath', build_base))
         else:
             fatal("unknown build style in project: %r" % project)
 
@@ -504,6 +507,9 @@ def test_build(base_name, run_info, variables, project, build_config, num_jobs,
             format_args = {"build_config": build_config}
             cmd = codesize_util + [os.path.join(build_base,
                                                 binary_path % format_args)]
+            if opts.verbose:
+                g_log.info('running: %s' %
+                           " ".join("'%s'" % arg for arg in cmd))
             result = subprocess.check_output(cmd).strip()
             if result != "fail":
                 bytes = long(result)
@@ -723,6 +729,9 @@ class CompileTest(builtintest.BuiltinTest):
         group.add_option("", "--ldxx", dest="ldxx",
                          help="Path to the cxx linker to use. (Xcode Distinction)",
                          type=str, default=None)
+        group.add_option("", "--runn", dest="runn",
+                         help="Path to runN tool.",
+                         type=str, default="runN")
         group.add_option("", "--test-externals", dest="test_suite_externals",
                          help="Path to the LLVM test-suite externals",
                          type=str, default=None, metavar="PATH")

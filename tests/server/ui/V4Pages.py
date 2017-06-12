@@ -267,7 +267,7 @@ def main():
     check_code(client, '/v4/nts/set_baseline/1', expected_code=HTTP_REDIRECT)
     with app.test_client() as c:
         c.get('/v4/nts/set_baseline/1')
-        session.get('baseline') == 1
+        session.get('baseline-default-nts') == 1
 
     # Get a run result page (and associated views).
     check_code(client, '/v4/nts/1')
@@ -433,12 +433,19 @@ def main():
     # Get a machine overview page.
     check_code(client, '/v4/compile/machine/1')
     check_code(client, '/v4/compile/machine/2')
+    check_code(client, '/v4/compile/machine/2/latest', expected_code=HTTP_REDIRECT)
     # Don't crash when requesting non-existing data
     check_code(client, '/v4/compile/machine/9999',
                expected_code=HTTP_NOT_FOUND)
     check_code(client, '/v4/compile/machine/-1', expected_code=HTTP_NOT_FOUND)
     check_code(client, '/v4/compile/machine/a', expected_code=HTTP_NOT_FOUND)
 
+    # Check the compare machine form gives correct redirects.
+    resp = check_code(client, '/v4/nts/machine/2/compare?compare_to_id=3', expected_code=HTTP_REDIRECT)
+    assert resp.headers['Location'] == "http://localhost/db_default/v4/nts/9?compare_to=4"
+    resp = check_code(client, '/v4/nts/machine/3/compare?compare_to_id=2', expected_code=HTTP_REDIRECT)
+    assert resp.headers['Location'] == "http://localhost/db_default/v4/nts/4?compare_to=9"
+    
     # Get the order summary page.
     check_code(client, '/v4/compile/all_orders')
 

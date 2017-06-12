@@ -1,52 +1,46 @@
 import datetime
+import json
 import os
 import re
 import tempfile
-import time
-import copy
-import json
-from typing import List, Optional
+from collections import namedtuple, defaultdict
+from urlparse import urlparse, urljoin
 
 import flask
-from flask import session
+import sqlalchemy.sql
 from flask import abort
 from flask import current_app
+from flask import flash
 from flask import g
 from flask import make_response
 from flask import redirect
 from flask import render_template
-from flask import request
-from flask import url_for
-from flask import flash
-
-from lnt.server.ui.util import FLASH_DANGER, FLASH_SUCCESS
-from lnt.testing.util.commands import warning, error, note
-import sqlalchemy.sql
-from sqlalchemy.orm.exc import NoResultFound
-
+from flask import request, url_for
+from flask import session
 from flask_wtf import Form
+from sqlalchemy.orm.exc import NoResultFound
+from typing import List, Optional
 from wtforms import SelectField, StringField, SubmitField
 from wtforms.validators import DataRequired, Length
 
+import lnt.server.db.rules_manager
+import lnt.server.db.search
+import lnt.server.reporting.analysis
+import lnt.server.reporting.dailyreport
+import lnt.server.reporting.runs
+import lnt.server.reporting.summaryreport
+import lnt.server.ui.util
 import lnt.util
 import lnt.util.ImportData
 import lnt.util.stats
-from lnt.server.ui.globals import db_url_for, v4_url_for
-import lnt.server.reporting.analysis
 from lnt.server.reporting.analysis import ComparisonResult, calc_geomean
-import lnt.server.reporting.runs
 from lnt.server.ui.decorators import frontend, db_route, v4_route
-import lnt.server.ui.util
-from lnt.server.ui.util import mean
-import lnt.server.reporting.dailyreport
-import lnt.server.reporting.summaryreport
-import lnt.server.db.rules_manager
-import lnt.server.db.search
+from lnt.server.ui.globals import db_url_for, v4_url_for
 from lnt.server.ui.regression_views import PrecomputedCR
-from collections import namedtuple, defaultdict
+from lnt.server.ui.util import FLASH_DANGER, FLASH_SUCCESS
+from lnt.server.ui.util import mean
 from lnt.util import async_ops
-from urlparse import urlparse, urljoin
-from flask import request, url_for
+from lnt.server.ui.util import baseline_key
 
 integral_rex = re.compile(r"[\d]+")
 
@@ -101,67 +95,72 @@ def index():
 ###
 # Database Actions
 
+
 @db_route('/submitRun', only_v3=False, methods=('GET', 'POST'))
 def submit_run():
-    if request.method == 'POST':
-        input_file = request.files.get('file')
-        input_data = request.form.get('input_data')
-        commit = int(request.form.get('commit', 0))
+    if request.method == 'GET':
+        return render_template("submit_run.html")
 
-	if input_file and not input_file.content_length:
-            input_file = None
+    assert request.method == 'POST'
+    input_file = request.files.get('file')
+    input_data = request.form.get('input_data')
+    commit = int(request.form.get('commit', 0))
 
-        if not input_file and not input_data:
-            return render_template(
-                "submit_run.html", error="must provide input file or data")
-        if input_file and input_data:
-            return render_template(
-                "submit_run.html", error="cannot provide input file *and* data")
+    if input_file and not input_file.content_length:
+        input_file = None
 
-        if input_file:
-            data_value = input_file.read()
-        else:
-            data_value = input_data
+    if not input_file and not input_data:
+        return render_template(
+            "submit_run.html", error="must provide input file or data")
+    if input_file and input_data:
+        return render_template(
+            "submit_run.html", error="cannot provide input file *and* data")
 
-        # Stash a copy of the raw submission.
-        #
-        # To keep the temporary directory organized, we keep files in
-        # subdirectories organized by (database, year-month).
-        utcnow = datetime.datetime.utcnow()
-        tmpdir = os.path.join(current_app.old_config.tempDir, g.db_name,
-                              "%04d-%02d" % (utcnow.year, utcnow.month))
-        try:
-            os.makedirs(tmpdir)
-        except OSError,e:
-            pass
+    if input_file:
+        data_value = input_file.read()  
+    else:
+        data_value = input_data
 
-        # Save the file under a name prefixed with the date, to make it easier
-        # to use these files in cases we might need them for debugging or data
-        # recovery.
-        prefix = utcnow.strftime("data-%Y-%m-%d_%H-%M-%S")
-        fd,path = tempfile.mkstemp(prefix=prefix, suffix='.plist',
-                                   dir=str(tmpdir))
-        os.write(fd, data_value)
-        os.close(fd)
+    # Stash a copy of the raw submission.
+    #
+    # To keep the temporary directory organized, we keep files in
+    # subdirectories organized by (database, year-month).
+    utcnow = datetime.datetime.utcnow()
+    tmpdir = os.path.join(current_app.old_config.tempDir, g.db_name,
+                          "%04d-%02d" % (utcnow.year, utcnow.month))
+    try:
+        os.makedirs(tmpdir)
+    except OSError,e:
+        pass
 
-        # Get a DB connection.
-        db = request.get_db()
+    # Save the file under a name prefixed with the date, to make it easier
+    # to use these files in cases we might need them for debugging or data
+    # recovery.
+    prefix = utcnow.strftime("data-%Y-%m-%d_%H-%M-%S")
+    fd,path = tempfile.mkstemp(prefix=prefix, suffix='.plist',
+                               dir=str(tmpdir))
+    os.write(fd, data_value)
+    os.close(fd)
 
-        # Import the data.
-        #
-        # FIXME: Gracefully handle formats failures and DOS attempts. We
-        # should at least reject overly large inputs.
-        result = lnt.util.ImportData.import_and_report(
-            current_app.old_config, g.db_name, db, path, '<auto>', commit)
+    # Get a DB connection.
+    db = request.get_db()
 
-        # It is nice to have a full URL to the run, so fixup the request URL
-        # here were we know more about the flask instance.
-        if result.get('result_url'):
-            result['result_url'] = request.url_root + result['result_url']
+    # Import the data.
+    #
+    # FIXME: Gracefully handle formats failures and DOS attempts. We
+    # should at least reject overly large inputs.
 
-        return flask.jsonify(**result)
+    result = lnt.util.ImportData.import_and_report(
+        current_app.old_config, g.db_name, db, path, '<auto>', commit)
 
-    return render_template("submit_run.html")
+    # It is nice to have a full URL to the run, so fixup the request URL
+    # here were we know more about the flask instance.
+    if result.get('result_url'):
+        result['result_url'] = request.url_root + result['result_url']
+
+    return flask.jsonify(**result)
+
+
 
 ###
 # V4 Schema Viewer
@@ -201,16 +200,47 @@ def v4_recent_activity():
 @v4_route("/machine/")
 def v4_machines():
     # Compute the list of associated runs, grouped by order.
-    from lnt.server.ui import util
 
     # Gather all the runs on this machine.
     ts = request.get_testsuite()
 
     return render_template("all_machines.html",
-                       ts=ts)
+                           ts=ts)
+
+
+@v4_route("/machine/<int:machine_id>/latest")
+def v4_machine_latest(machine_id):
+    """Return the most recent run on this machine."""
+    ts = request.get_testsuite()
+
+    run = ts.query(ts.Run) \
+        .filter(ts.Run.machine_id == machine_id) \
+        .order_by(ts.Run.start_time.desc()) \
+        .first()
+    return redirect(v4_url_for('v4_run', id=run.id))
+
+
+@v4_route("/machine/<int:machine_id>/compare")
+def v4_machine_compare(machine_id):
+    """Return the most recent run on this machine."""
+    ts = request.get_testsuite()
+    machine_compare_to_id = int(request.args['compare_to_id'])
+    machine_1_run = ts.query(ts.Run) \
+        .filter(ts.Run.machine_id == machine_id) \
+        .order_by(ts.Run.start_time.desc()) \
+        .first()
+
+    machine_2_run = ts.query(ts.Run) \
+        .filter(ts.Run.machine_id == machine_compare_to_id) \
+        .order_by(ts.Run.start_time.desc()) \
+        .first()
+
+    return redirect(v4_url_for('v4_run', id=machine_1_run.id, compare_to=machine_2_run.id))
+
 
 @v4_route("/machine/<int:id>")
 def v4_machine(id):
+
     # Compute the list of associated runs, grouped by order.
     from lnt.server.ui import util
 
@@ -226,6 +256,8 @@ def v4_machine(id):
     associated_runs = associated_runs.items()
     associated_runs.sort()
 
+    machines = ts.query(ts.Machine).all()
+
     if request.args.get('json'):
         json_obj = dict()
         machine_obj = ts.query(ts.Machine).filter(ts.Machine.id == id).one()
@@ -240,9 +272,11 @@ def v4_machine(id):
         return flask.jsonify(**json_obj)
     try:
         return render_template("v4_machine.html",
-                           testsuite_name=g.testsuite_name, id=id,
-                           associated_runs=associated_runs)
-    except NoResultFound as e:
+                               testsuite_name=g.testsuite_name,
+                               id=id,
+                               associated_runs=associated_runs,
+                               machines=machines)
+    except NoResultFound:
         abort(404)
 
 class V4RequestInfo(object):
@@ -526,7 +560,7 @@ def v4_set_baseline(id):
     if not base:
         return abort(404)
     flash("Baseline set to " + base.name, FLASH_SUCCESS)
-    session['baseline'] = id
+    session[baseline_key()] = id
 
     return redirect(get_redirect_target())
 
@@ -1402,7 +1436,7 @@ def baseline():
     or None if one is not defined.
     """
     ts = request.get_testsuite()
-    base_id = session.get('baseline')
+    base_id = session.get(baseline_key())
     if not base_id:
         return None
     try:

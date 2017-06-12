@@ -2,6 +2,8 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8"/>
+
+    <script>var lnt_url_base="{{ url_for('index', _external=True) }}";</script>
     <link href="{{ url_for('.static', filename='bootstrap/css/bootstrap.min.css')
                 }}" rel="stylesheet" media="screen"/>
     <link href="{{ url_for('.static', filename='bootstrap/css/bootstrap-responsive.min.css')
@@ -194,7 +196,7 @@
                             <ul class="dropdown-menu">
                                 <li class="nav-header">Select baseline:</li>
                                 {% for b in ts.query(ts.Baseline).all() %}
-                                {% set is_bold = b.id == session.get('baseline') %}
+                                {% set is_bold = b.id == session.get(baseline_key()) %}
                               <li><a href="{{ v4_url_for('v4_set_baseline', id=b.id) }}">
                                   {% if is_bold %}
                                       <b>{{ b.name }}</b>

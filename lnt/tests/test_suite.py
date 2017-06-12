@@ -265,6 +265,9 @@ class TestSuiteTest(BuiltinTest):
                          type='choice',
                          choices=['none', 'time', 'profile', 'all'],
                          default='none')
+        group.add_option("", "--perf-events", dest="perf_events",
+                         help=("Define which linux perf events to measure"),
+                         type=str, default=None)
         group.add_option("", "--run-under", dest="run_under",
                          help="Wrapper to run tests under ['%default']",
                          type=str, default="")
@@ -492,7 +495,10 @@ class TestSuiteTest(BuiltinTest):
         for i in range(max(opts.exec_multisample, opts.compile_multisample)):
             c = i < opts.compile_multisample
             e = i < opts.exec_multisample
-            run_report, json_data = self.run(cmake_vars, compile=c, test=e)
+            # only gather perf profiles on a single run.
+            p = i == 0 and self.opts.use_perf in ('profile', 'all')
+            run_report, json_data = self.run(cmake_vars, compile=c, test=e,
+                                             profile=p)
             reports.append(run_report)
             json_reports.append(json_data)
 
@@ -525,7 +531,7 @@ class TestSuiteTest(BuiltinTest):
             self._clean(self._base_path)
             self.configured = True
 
-    def run(self, cmake_vars, compile=True, test=True):
+    def run(self, cmake_vars, compile=True, test=True, profile=False):
         mkdir_p(self._base_path)
 
         if self.opts.pgo:
@@ -541,7 +547,7 @@ class TestSuiteTest(BuiltinTest):
             self._make(self._base_path)
             self.compiled = True
 
-        data = self._lit(self._base_path, test)
+        data = self._lit(self._base_path, test, profile)
         return self._parse_lit_output(self._base_path, data, cmake_vars), data
 
     def _create_merged_report(self, reports):
@@ -597,13 +603,22 @@ class TestSuiteTest(BuiltinTest):
         if self.opts.cxx:
             defs['CMAKE_CXX_COMPILER'] = self.opts.cxx
 
+        cmake_build_types = ('DEBUG','MINSIZEREL', 'RELEASE', 'RELWITHDEBINFO')
         if self.opts.cppflags or self.opts.cflags:
             all_cflags = ' '.join([self.opts.cppflags, self.opts.cflags])
             defs['CMAKE_C_FLAGS'] = self._unix_quote_args(all_cflags)
+            # Ensure that no flags get added based on build type when the user
+            # explicitly specifies flags to use.
+            for build_type in cmake_build_types:
+                defs['CMAKE_C_FLAGS_'+build_type] = ""
 
         if self.opts.cppflags or self.opts.cxxflags:
             all_cxx_flags = ' '.join([self.opts.cppflags, self.opts.cxxflags])
             defs['CMAKE_CXX_FLAGS'] = self._unix_quote_args(all_cxx_flags)
+            # Ensure that no flags get added based on build type when the user
+            # explicitly specifies flags to use.
+            for build_type in cmake_build_types:
+                defs['CMAKE_CXX_FLAGS_'+build_type] = ""
 
         if self.opts.run_under:
             defs['TEST_SUITE_RUN_UNDER'] = self._unix_quote_args(self.opts.run_under)
@@ -674,7 +689,7 @@ class TestSuiteTest(BuiltinTest):
                       "TEST_SUITE_RUN_TYPE=train"]
         self._configure(path, extra_cmake_defs=extra_defs)
         self._make(path)
-        self._lit(path, True)
+        self._lit(path, True, False)
 
     def _make(self, path):
         make_cmd = self.opts.make
@@ -702,7 +717,7 @@ class TestSuiteTest(BuiltinTest):
             # experimental compiler.
             pass
 
-    def _lit(self, path, test):
+    def _lit(self, path, test, profile):
         lit_cmd = self.opts.lit
 
         output_json_path = tempfile.NamedTemporaryFile(prefix='output',
@@ -719,14 +734,24 @@ class TestSuiteTest(BuiltinTest):
         extra_args = []
         if not test:
             extra_args = ['--no-execute']
-        if self.opts.use_perf in ('profile', 'all'):
+
+        nr_threads = self._test_threads()
+        if profile:
+            if nr_threads != 1:
+                warning('Gathering profiles with perf requires -j 1 as ' +
+                        'perf record cannot be run multiple times ' +
+                        'simultaneously. Overriding -j %s to -j 1' % nr_threads)
+                nr_threads = 1
             extra_args += ['--param', 'profile=perf']
+            if self.opts.perf_events:
+                extra_args += ['--param',
+                               'perf_profile_events=%s' % self.opts.perf_events]
 
         note('Testing...')
         try:
             self._check_call([lit_cmd,
                               '-v',
-                              '-j', str(self._test_threads()),
+                              '-j', str(nr_threads),
                               subdir,
                               '-o', output_json_path.name] + extra_args)
         except subprocess.CalledProcessError:

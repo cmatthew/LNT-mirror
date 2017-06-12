@@ -26,6 +26,7 @@ from threading import Lock
 from lnt.testing.util.commands import note, warning, timed, error
 NUM_WORKERS = 4  # The number of subprocesses to spawn per LNT process.
 WORKERS = None  # The worker pool.
+WORKERS_LOCK = Lock()
 
 JOBS = []
 
@@ -33,20 +34,25 @@ JOBS = []
 def launch_workers():
     """Make sure we have a worker pool ready to queue."""
     global WORKERS
-    if not WORKERS:
-        note("Starting workers")
-        manager = Manager()
-        try:
-            current_app.config['mem_logger'].buffer = \
-                manager.list(current_app.config['mem_logger'].buffer)
-        except RuntimeError:
-            #  It might be the case that we are not running in the app.
-            #  In this case, don't bother memory logging, stdout should
-            #  sufficient for console mode.
-            pass
+    global WORKERS_LOCK
+    WORKERS_LOCK.acquire()
+    try:
+        if not WORKERS:
+            note("Starting workers")
+            manager = Manager()
+            WORKERS = True
+            try:
+                current_app.config['mem_logger'].buffer = \
+                    manager.list(current_app.config['mem_logger'].buffer)
+            except RuntimeError:
+                #  It might be the case that we are not running in the app.
+                #  In this case, don't bother memory logging, stdout should
+                #  sufficient for console mode.
+                pass
+    finally:
+        WORKERS_LOCK.release()
 
-
-def sigHandler(signo, frame):
+def sig_handler(signo, frame):
     cleanup()
     sys.exit(0)
 
@@ -64,16 +70,16 @@ def cleanup():
 
 
 atexit.register(cleanup)
-signal.signal(signal.SIGTERM, sigHandler)
+signal.signal(signal.SIGTERM, sig_handler)
 
 
-def async_fieldchange_calc(db_name, ts, run):
+def async_fieldchange_calc(db_name, ts, run, db_config):
     """Run regenerate field changes in the background."""
     func_args = {'run_id': run.id}
     #  Make sure this run is in the database!
     async_run_job(fieldchange.post_submit_tasks,
                   db_name, ts,
-                  func_args)
+                  func_args, db_config)
 
 
 def check_workers(is_logged):
@@ -93,7 +99,7 @@ def check_workers(is_logged):
     return len(JOBS)
 
 
-def async_run_job(job, db_name, ts, func_args):
+def async_run_job(job, db_name, ts, func_args, db_config):
     """Send a job to the async wrapper in the subprocess."""
     # If the run is not in the database, we can't do anything more.
     note("Queuing background job to process fieldchanges " + str(os.getpid()))
@@ -101,7 +107,8 @@ def async_run_job(job, db_name, ts, func_args):
     check_workers(True)
 
     args = {'tsname': ts.name,
-            'db': db_name}
+            'db': db_name,
+            'db_info': db_config}
     job = Process(target=async_wrapper,
                   args=[job, args, func_args])
 
@@ -114,6 +121,7 @@ def async_run_job(job, db_name, ts, func_args):
 # Flag to track if we have disposed of the parents database connections in
 # this subprocess.
 clean_db = False
+
 
 def async_wrapper(job, ts_args, func_args):
     """Setup test-suite in this subprocess and run something.
@@ -130,8 +138,8 @@ def async_wrapper(job, ts_args, func_args):
             clean_db = True
         sleep(3)
         note("Running async wrapper: {} ".format(job.__name__)+ str(os.getpid()))
-
-        _v4db = current_app.old_config.get_database(ts_args['db'])
+        config = ts_args['db_info']
+        _v4db = config.get_database(ts_args['db'])
         #with contextlib.closing(_v4db) as db:
         ts = _v4db.testsuite[ts_args['tsname']]
         nothing = job(ts, **func_args)
