@@ -55,7 +55,7 @@
       {# Show the active submissions. #}
       {% for r,run_order in active_submissions %}
       <tr>
-          <td><a href="{{v4_url_for('v4_order', id=r.order.id)}}">{{run_order}}</a> <a href="http://llvm.org/viewvc/llvm-project?view=revision&revision={{ run_order }}"><i class="icon-info-sign"></i></a></td>
+          <td><a href="{{v4_url_for('v4_order', id=r.order.id)}}">r{{run_order}}</a> <a href="http://llvm.org/viewvc/llvm-project?view=revision&revision={{ run_order }}"><i class="icon-info-sign"></i></a></td>
         <td><span class="reltime" data-toggle="tooltip" title="{{r.start_time}}">{{ r.start_time.isoformat() }}</span></td>
         <td>{{ r.end_time - r.start_time }}</td>
         <td>{{ utils.render_machine(r.machine) }}</td>
