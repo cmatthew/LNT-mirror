@@ -96,7 +96,7 @@
     {% for run in runs %}
     <tr>
       {% if loop.first %}
-      <td rowspan="{{ runs|length }}" style="text-align:right">local.{{ order.as_ordered_string() }}</td>
+      <td rowspan="{{ runs|length }}" style="text-align:right">{{ order.as_ordered_string() }} <a href="http://llvm.org/viewvc/llvm-project?view=revision&revision={{ order.as_ordered_string() }}"><i class="icon-info-sign"></i></a></td>
       {% endif %}
       <td><span class="utctime">{{ run.start_time.isoformat() }}</span></td>
       <td>{{ run.end_time - run.start_time }}s</td>
