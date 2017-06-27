@@ -224,6 +224,10 @@ class TestSuiteDB(object):
                     ', '.join(self.get_field(field)
                               for field in self.fields),)
 
+            @property
+            def name(self):
+                return self.as_ordered_string()
+
             def __cmp__(self, b):
                 # SA occassionally uses comparison to check model instances
                 # verse some sentinels, so we ensure we support comparison
@@ -251,6 +255,7 @@ class TestSuiteDB(object):
                 order = dict((item.name, self.get_field(item))
                               for item in self.fields)
                 order[u'id'] = self.id
+                order[u'name'] = self.as_ordered_string()
                 return strip(order)
                 
                 
@@ -923,7 +928,7 @@ test %r is misnamed for reporting under schema %r""" % (
 
     def importDataFromDict(self, data, commit, config=None):
         """
-        importDataFromDict(data) -> Run, bool
+        importDataFromDict(data) -> bool, Run
 
         Import a new run from the provided test interchange data, and return the
         constructed Run record.
@@ -1050,3 +1055,6 @@ test %r is misnamed for reporting under schema %r""" % (
 
     def get_next_runs_on_machine(self, run, N):
         return self.get_adjacent_runs_on_machine(run, N, direction = 1)
+
+    def __repr__(self):
+        return "{} (on {})".format(self.name, self.v4db.path)

@@ -18,6 +18,7 @@ from flask import render_template
 from flask import request, url_for
 from flask import session
 from flask_wtf import Form
+from sqlalchemy.orm import joinedload
 from sqlalchemy.orm.exc import NoResultFound
 from typing import List, Optional
 from wtforms import SelectField, StringField, SubmitField
@@ -40,9 +41,7 @@ from lnt.server.ui.regression_views import PrecomputedCR
 from lnt.server.ui.util import FLASH_DANGER, FLASH_SUCCESS
 from lnt.server.ui.util import mean
 from lnt.util import async_ops
-from lnt.server.ui.util import baseline_key
-
-integral_rex = re.compile(r"[\d]+")
+from lnt.server.ui.util import baseline_key, convert_revision
 
 
 # http://flask.pocoo.org/snippets/62/
@@ -176,9 +175,13 @@ def v4_recent_activity():
 
     # Get the most recent runs in this tag, we just arbitrarily limit to looking
     # at the last 100 submission.
-    recent_runs = ts.query(ts.Run).\
-        order_by(ts.Run.start_time.desc()).limit(100)
-    recent_runs = list(recent_runs)
+    recent_runs = ts.query(ts.Run) \
+        .join(ts.Order) \
+        .join(ts.Machine) \
+        .options(joinedload(ts.Run.order)) \
+        .options(joinedload(ts.Run.machine)) \
+        .order_by(ts.Run.start_time.desc()).limit(100)
+    recent_runs = recent_runs.all()
 
     # Compute the active machine list.
     active_machines = dict((run.machine.name, run)
@@ -217,7 +220,7 @@ def v4_machine_latest(machine_id):
         .filter(ts.Run.machine_id == machine_id) \
         .order_by(ts.Run.start_time.desc()) \
         .first()
-    return redirect(v4_url_for('v4_run', id=run.id))
+    return redirect(v4_url_for('v4_run', id=run.id, **request.args))
 
 
 @v4_route("/machine/<int:machine_id>/compare")
@@ -469,17 +472,17 @@ def v4_run(id):
         reported_tests = ts.query(ts.Test.name, ts.Test.id).\
             filter(ts.Run.id == id).\
             filter(ts.Test.id.in_(sri.test_ids)).all()
+        order = run.order.as_ordered_string()
 
-        json_obj['tests'] = {}
         for test_name, test_id in reported_tests:
-            test = {}
-            test['name'] = test_name
+            test = dict(test_name=test_name, test_id=test_id,
+                        order=order, machine=run.machine.name)
             for sample_field in ts.sample_fields:
                 res = sri.get_run_comparison_result(
                     run, None, test_id, sample_field,
                     ts.Sample.get_hash_of_binary_field())
                 test[sample_field.name] = res.current
-            json_obj['tests'][test_id] = test
+            json_obj[test_name] = test
 
         return flask.jsonify(**json_obj)
 
@@ -662,14 +665,6 @@ def v4_graph():
     options['hide_highlight'] = bool(
         request.args.get('hide_highlight'))
     show_highlight = not options['hide_highlight']
-
-    def convert_revision(dotted):
-        """Turn a version number like 489.2.10 into something
-        that is ordered and sortable.
-        For now 489.2.10 will be returned as a tuple of ints.
-        """
-        dotted = integral_rex.findall(dotted)
-        return tuple([int(d) for d in dotted])
 
     # Load the graph parameters.
     graph_parameters = []
@@ -887,6 +882,7 @@ def v4_graph():
         else:
             normalize_by = 1.0
 
+        using_ints = True
         for pos, (point_label, datapoints) in enumerate(data):
             # Get the samples.
             data = [data_date[0] for data_date in datapoints]
@@ -898,7 +894,9 @@ def v4_graph():
             # When we can, map x-axis to revisions, but when that is too hard
             # use the position of the sample instead.
             rev_x = convert_revision(point_label)
-            x = rev_x[0] if len(rev_x)==1 else pos
+            if using_ints and len(rev_x) != 1:
+                using_ints = False
+            x = rev_x[0] if using_ints else pos
 
             values = [v*normalize_by for v in data]
             aggregation_fn = min

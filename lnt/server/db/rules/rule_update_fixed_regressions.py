@@ -36,29 +36,27 @@ def regression_evolution(ts, run_id):
     """
     note("Running regression evolution")
     changed = 0
-    regressions = ts.query(ts.Regression).all()
+    evolve_states = [RegressionState.DETECTED, RegressionState.STAGED, RegressionState.ACTIVE]
+    regressions = ts.query(ts.Regression).filter(ts.Regression.state.in_(evolve_states)).all()
+
     detects = [r for r in regressions if r.state == RegressionState.DETECTED]
-    
+    staged = [r for r in regressions if r.state == RegressionState.STAGED]
+    active = [r for r in regressions if r.state == RegressionState.ACTIVE]
+
     for regression in detects:
         if is_fixed(ts, regression):
             note("Detected fixed regression" + str(regression))
             regression.state = RegressionState.IGNORED
             regression.title = regression.title + " [Detected Fixed]"
             changed += 1
-    ts.commit()
 
-    staged = [r for r in regressions if r.state == RegressionState.STAGED]
-    
     for regression in staged:
         if is_fixed(ts, regression):
             note("Staged fixed regression" + str(regression))
             regression.state = RegressionState.DETECTED_FIXED
             regression.title = regression.title + " [Detected Fixed]"
             changed += 1
-    ts.commit()
-    
-    active = [r for r in regressions if r.state == RegressionState.ACTIVE]
-    
+
     for regression in active:
         if is_fixed(ts, regression):
             note("Active fixed regression" + str(regression))
