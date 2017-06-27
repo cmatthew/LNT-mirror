@@ -3,10 +3,32 @@
 {% block title %}Overview{% endblock %}
 {% block body %}
 
-{# Display available test result suites. #}
-<h3>Test Suites</h3>
-{% for name in request.get_db().testsuite %}
-  <a href="{{db_url_for('v4_recent_activity', testsuite_name=name)}}">{{name}}</a><br>
-{% endfor %}
+
+    <div class="container">
+        <h1>LLVM Nightly Testing</h1>
+        <p class="lead">LNT is a set of client and sever tools for monitoring the performance of software
+        over its lifecycle.</p>
+
+        <p>To setup your own LNT server or view the code visit the <a href="https://llvm.org/lnt/">main docs</a>.</p>
+
+        <h3>Data Sources</h3>
+        <p>Several bots submit data to this LNT server:</p>
+        <table class="table">
+            <thead>
+            <th>Source</th>
+            </thead>
+            <tr><td><a href="http://green.lab.llvm.org/green/view/Compile%20Time/">Green Dragon</a></td></tr>
+            <tr><td><a href="http://lab.llvm.org:8011">LLVM Buildbots</a></td></tr>
+        </table>
+
+    </div>
+
+    {# Display available test result suites. #}
+    <div class="container">
+        <h3>Test Suites</h3>
+        {% for name in request.get_db().testsuite %}
+            <a href="{{ db_url_for('v4_recent_activity', testsuite_name=name) }}">{{ name }}</a><br>
+        {% endfor %}
+    </div>
 
 {% endblock %}
