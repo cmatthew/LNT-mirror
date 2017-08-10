@@ -1,17 +1,23 @@
-import os, re, time
-import collections
-import lnt.testing
-import lnt.formats
-import lnt.server.reporting.analysis
-from lnt.testing.util.commands import note
 from lnt.util import NTEmailReport
 from lnt.util import async_ops
+from lnt.util import logger
+import collections
+import datetime
+import lnt.formats
+import lnt.server.reporting.analysis
+import lnt.testing
+import os
+import re
+import tempfile
+import time
 
-def import_and_report(config, db_name, db, file, format, commit=False,
-                      show_sample_count=False, disable_email=False,
-                      disable_report=False):
+
+def import_and_report(config, db_name, db, file, format, ts_name,
+                      commit=False, show_sample_count=False,
+                      disable_email=False, disable_report=False,
+                      updateMachine=False, mergeRun='replace'):
     """
-    import_and_report(config, db_name, db, file, format,
+    import_and_report(config, db_name, db, file, format, ts_name,
                       [commit], [show_sample_count],
                       [disable_email]) -> ... object ...
 
@@ -20,21 +26,27 @@ def import_and_report(config, db_name, db, file, format, commit=False,
     the value of commit, this merely changes whether the run (on success) is
     committed to the database.
 
-    The result object is a dictionary containing information on the imported run
-    and its comparison to the previous run.
+    The result object is a dictionary containing information on the imported
+    run and its comparison to the previous run.
     """
-    numMachines = db.getNumMachines()
-    numRuns = db.getNumRuns()
-    numTests = db.getNumTests()
+    result = {
+        'success': False,
+        'error': None,
+        'import_file': file,
+    }
 
-    # If the database gets fragmented, count(*) in SQLite can get really slow!?!
+    ts = db.testsuite.get(ts_name)
+    if ts is None:
+        result['error'] = "Unknown test suite '%s'!" % ts_name
+        return result
+    numMachines = ts.getNumMachines()
+    numRuns = ts.getNumRuns()
+    numTests = ts.getNumTests()
+
+    # If the database gets fragmented, count(*) in SQLite can get really
+    # slow!?!
     if show_sample_count:
-        numSamples = db.getNumSamples()
-
-    result = {}
-    result['success'] = False
-    result['error'] = None
-    result['import_file'] = file
+        numSamples = ts.getNumSamples()
 
     startTime = time.time()
     try:
@@ -43,13 +55,14 @@ def import_and_report(config, db_name, db, file, format, commit=False,
         raise
     except:
         import traceback
-        result['error'] = "load failure: %s" % traceback.format_exc()
+        result['error'] = "could not parse input format"
+        result['message'] = traceback.format_exc()
         return result
 
     result['load_time'] = time.time() - startTime
 
     # Auto-upgrade the data, if necessary.
-    lnt.testing.upgrade_report(data)
+    data = lnt.testing.upgrade_report(data, ts_name)
 
     # Find the database config, if we have a configuration object.
     if config:
@@ -63,7 +76,7 @@ def import_and_report(config, db_name, db, file, format, commit=False,
         email_config = db_config.email_config
         if email_config.enabled:
             # Find the machine name.
-            machineName = str(data.get('Machine',{}).get('Name'))
+            machineName = str(data.get('Machine', {}).get('Name'))
             toAddress = email_config.get_to_address(machineName)
             if toAddress is None:
                 result['error'] = ("unable to match machine name "
@@ -72,22 +85,30 @@ def import_and_report(config, db_name, db, file, format, commit=False,
 
     importStartTime = time.time()
     try:
-        success, run = db.importDataFromDict(data, commit, config=db_config)
+        data_schema = data.get('schema')
+        if data_schema is not None and data_schema != ts_name:
+            result['error'] = ("Importing '%s' data into test suite '%s'" %
+                               (data_schema, ts_name))
+            return result
+
+        run = ts.importDataFromDict(data, commit, config=db_config,
+                                    updateMachine=updateMachine,
+                                    mergeRun=mergeRun)
     except KeyboardInterrupt:
         raise
-    except:
-        raise
+    except Exception as e:
         import traceback
-        result['error'] = "import failure: %s" % traceback.format_exc()
+        result['error'] = "import failure: %s" % e.message
+        result['message'] = traceback.format_exc()
+        if isinstance(e, lnt.server.db.testsuitedb.MachineInfoChanged):
+            result['message'] += '\n\nNote: Use --update-machine to update ' \
+                                 'the existing machine information.\n'
         return result
 
     # If the import succeeded, save the import path.
     run.imported_from = file
 
     result['import_time'] = time.time() - importStartTime
-    if not success:
-        # Record the original run this is a duplicate of.
-        result['original_run'] = run.id
 
     reportStartTime = time.time()
     result['report_to_address'] = toAddress
@@ -99,35 +120,33 @@ def import_and_report(config, db_name, db, file, format, commit=False,
     if not disable_report:
         #  This has the side effect of building the run report for
         #  this result.
-        NTEmailReport.emailReport(result, db, run, report_url,
-                                  email_config, toAddress, success, commit)
+        NTEmailReport.emailReport(result, db, run, report_url, email_config,
+                                  toAddress, True)
 
-    result['added_machines'] = db.getNumMachines() - numMachines
-    result['added_runs'] = db.getNumRuns() - numRuns
-    result['added_tests'] = db.getNumTests() - numTests
+    result['added_machines'] = ts.getNumMachines() - numMachines
+    result['added_runs'] = ts.getNumRuns() - numRuns
+    result['added_tests'] = ts.getNumTests() - numTests
     if show_sample_count:
-        result['added_samples'] = db.getNumSamples() - numSamples
+        result['added_samples'] = ts.getNumSamples() - numSamples
 
     result['committed'] = commit
     result['run_id'] = run.id
-    ts_name = data['Run']['Info'].get('tag')
     if commit:
-        db.commit()
+        ts.commit()
         if db_config:
             #  If we are not in a dummy instance, also run background jobs.
             #  We have to have a commit before we run, so subprocesses can
             #  see the submitted data.
-            ts = db.testsuite.get(ts_name)
             async_ops.async_fieldchange_calc(db_name, ts, run, config)
 
     else:
-        db.rollback()
+        ts.rollback()
     # Add a handy relative link to the submitted run.
 
     result['result_url'] = "db_{}/v4/{}/{}".format(db_name, ts_name, run.id)
     result['report_time'] = time.time() - importStartTime
     result['total_time'] = time.time() - startTime
-    note("Successfully created {}".format(result['result_url']))
+    logger.info("Successfully created {}".format(result['result_url']))
     # If this database has a shadow import configured, import the run into that
     # database as well.
     if config and config.databases[db_name].shadow_import:
@@ -136,14 +155,15 @@ def import_and_report(config, db_name, db, file, format, commit=False,
         shadow_name = db_config.shadow_import
         with closing(config.get_database(shadow_name)) as shadow_db:
             if shadow_db is None:
-                raise ValueError, ("invalid configuration, shadow import "
-                                   "database %r does not exist") % shadow_name
+                raise ValueError("invalid configuration, shadow import "
+                                 "database %r does not exist" % shadow_name)
 
             # Perform the shadow import.
             shadow_result = import_and_report(config, shadow_name,
-                                              shadow_db, file, format, commit,
-                                              show_sample_count, disable_email,
-                                              disable_report)
+                                              shadow_db, file, format, ts_name,
+                                              commit, show_sample_count,
+                                              disable_email, disable_report,
+                                              updateMachine)
 
             # Append the shadow result to the result.
             result['shadow_result'] = shadow_result
@@ -151,7 +171,17 @@ def import_and_report(config, db_name, db, file, format, commit=False,
     result['success'] = True
     return result
 
-def print_report_result(result, out, err, verbose = True):
+
+def no_submit():
+    """Do not submit but create dummy submission report."""
+    return {
+        'success': True,
+        'result_url': None,
+        'test_results': None,
+    }
+
+
+def print_report_result(result, out, err, verbose=True):
     """
     print_report_result(result, out, [err], [verbose]) -> None
 
@@ -160,17 +190,21 @@ def print_report_result(result, out, err, verbose = True):
     """
 
     # Print the generic import information.
-    print >>out, "Importing %r" % os.path.basename(result['import_file'])
+    if 'import_file' in result:
+        print >>out, "Importing %r" % os.path.basename(result['import_file'])
     if result['success']:
         print >>out, "Import succeeded."
         print >>out
     else:
         out.flush()
         print >>err, "Import Failed:"
-        print >>err, "--\n%s--\n" % result['error']
+        print >>err, "%s\n" % result['error']
+        if result['message']:
+            print >>err, "%s\n" % result['message']
+        print >>err, "--------------"
         err.flush()
         return
-        
+
     # Print the test results.
     test_results = result.get('test_results')
     if not test_results:
@@ -181,7 +215,7 @@ def print_report_result(result, out, err, verbose = True):
     if show_pset:
         print >>out, "Parameter Sets"
         print >>out, "--------------"
-        for i,info in enumerate(test_results):
+        for i, info in enumerate(test_results):
             print >>out, "P%d: %s" % (i, info['pset'])
         print >>out
 
@@ -190,18 +224,18 @@ def print_report_result(result, out, err, verbose = True):
     print >>out, "--- Tested: %d tests --" % total_num_tests
     test_index = 0
     result_kinds = collections.Counter()
-    for i,item in enumerate(test_results):
+    for i, item in enumerate(test_results):
         pset = item['pset']
         pset_results = item['results']
 
-        for name,test_status,perf_status in pset_results:
+        for name, test_status, perf_status in pset_results:
             test_index += 1
-            # FIXME: Show extended information for performance changes, previous
-            # samples, standard deviation, all that.
+            # FIXME: Show extended information for performance changes,
+            # previous samples, standard deviation, all that.
             #
             # FIXME: Think longer about mapping to test codes.
             result_info = None
-            
+
             if test_status == lnt.server.reporting.analysis.REGRESSED:
                 result_string = 'FAIL'
             elif test_status == lnt.server.reporting.analysis.UNCHANGED_FAIL:
@@ -209,7 +243,7 @@ def print_report_result(result, out, err, verbose = True):
             elif test_status == lnt.server.reporting.analysis.IMPROVED:
                 result_string = 'IMPROVED'
                 result_info = "Test started passing."
-            elif perf_status == None:
+            elif perf_status is None:
                 # Missing perf status means test was just added or removed.
                 result_string = 'PASS'
             elif perf_status == lnt.server.reporting.analysis.REGRESSED:
@@ -227,8 +261,8 @@ def print_report_result(result, out, err, verbose = True):
 
             if show_pset:
                 name = 'P%d :: %s' % (i, name)
-            print >>out, "%s: %s (%d of %d)" % (result_string, name, test_index,
-                                                total_num_tests)
+            print >>out, "%s: %s (%d of %d)" % (result_string, name,
+                                                test_index, total_num_tests)
 
             if result_info:
                 print >>out, "%s TEST '%s' %s" % ('*'*20, name, '*'*20)
@@ -276,3 +310,37 @@ def print_report_result(result, out, err, verbose = True):
     print >>out, "----------------"
     for kind, count in result_kinds.items():
         print >>out, kind, ":", count
+
+
+def import_from_string(config, db_name, db, ts_name, data, commit=True,
+                       updateMachine=False, mergeRun='replace'):
+    # Stash a copy of the raw submission.
+    #
+    # To keep the temporary directory organized, we keep files in
+    # subdirectories organized by (database, year-month).
+    utcnow = datetime.datetime.utcnow()
+    tmpdir = os.path.join(config.tempDir, db_name,
+                          "%04d-%02d" % (utcnow.year, utcnow.month))
+    try:
+        os.makedirs(tmpdir)
+    except OSError as e:
+        pass
+
+    # Save the file under a name prefixed with the date, to make it easier
+    # to use these files in cases we might need them for debugging or data
+    # recovery.
+    prefix = utcnow.strftime("data-%Y-%m-%d_%H-%M-%S")
+    fd, path = tempfile.mkstemp(prefix=prefix, suffix='.json',
+                                dir=str(tmpdir))
+    os.write(fd, data)
+    os.close(fd)
+
+    # Import the data.
+    #
+    # FIXME: Gracefully handle formats failures and DOS attempts. We
+    # should at least reject overly large inputs.
+
+    result = lnt.util.ImportData.import_and_report(
+        config, db_name, db, path, '<auto>', ts_name, commit,
+        updateMachine=updateMachine, mergeRun=mergeRun)
+    return result

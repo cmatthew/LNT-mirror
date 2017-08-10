@@ -4,7 +4,9 @@ Staged or Active + fixed -> Verify
 """
 from lnt.server.db.regression import RegressionState
 from lnt.server.db.regression import get_cr_for_field_change, get_ris
-from lnt.testing.util.commands import note, timed
+from lnt.util import logger
+from lnt.testing.util.commands import timed
+
 
 def _fixed_rind(ts, rind):
     """Is this regression indicator fixed?"""
@@ -16,6 +18,7 @@ def _fixed_rind(ts, rind):
         return True
     else:
         return False
+
 
 def is_fixed(ts, regression):
     """Comparing the current value to the regression, is this regression now
@@ -31,13 +34,16 @@ def regression_evolution(ts, run_id):
     """Analyse regressions. If they have changes, process them.
     Look at each regression in state detect.  Move to ignore if it is fixed.
     Look at each regression in state stage. Move to verify if fixed.
-    Look at regressions in detect, do they match our policy? If no, move to NTBF.
-
+    Look at regressions in detect, do they match our policy? If no, move to
+    NTBF.
     """
-    note("Running regression evolution")
+    logger.info("Running regression evolution")
     changed = 0
-    evolve_states = [RegressionState.DETECTED, RegressionState.STAGED, RegressionState.ACTIVE]
-    regressions = ts.query(ts.Regression).filter(ts.Regression.state.in_(evolve_states)).all()
+    evolve_states = [RegressionState.DETECTED, RegressionState.STAGED,
+                     RegressionState.ACTIVE]
+    regressions = ts.query(ts.Regression) \
+        .filter(ts.Regression.state.in_(evolve_states)) \
+        .all()
 
     detects = [r for r in regressions if r.state == RegressionState.DETECTED]
     staged = [r for r in regressions if r.state == RegressionState.STAGED]
@@ -45,25 +51,25 @@ def regression_evolution(ts, run_id):
 
     for regression in detects:
         if is_fixed(ts, regression):
-            note("Detected fixed regression" + str(regression))
+            logger.info("Detected fixed regression" + str(regression))
             regression.state = RegressionState.IGNORED
             regression.title = regression.title + " [Detected Fixed]"
             changed += 1
 
     for regression in staged:
         if is_fixed(ts, regression):
-            note("Staged fixed regression" + str(regression))
+            logger.info("Staged fixed regression" + str(regression))
             regression.state = RegressionState.DETECTED_FIXED
             regression.title = regression.title + " [Detected Fixed]"
             changed += 1
 
     for regression in active:
         if is_fixed(ts, regression):
-            note("Active fixed regression" + str(regression))
+            logger.info("Active fixed regression" + str(regression))
             regression.state = RegressionState.DETECTED_FIXED
             regression.title = regression.title + " [Detected Fixed]"
             changed += 1
     ts.commit()
-    note("Changed the state of {} regressions".format(changed))
-    
+    logger.info("Changed the state of {} regressions".format(changed))
+
 post_submission_hook = regression_evolution

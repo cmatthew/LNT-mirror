@@ -1,6 +1,5 @@
-__all__ = []
+import logging
 
-try:
-    import json
-except ImportError:
-    import simplejson as json
+logger = logging.getLogger("lnt.server.ui.app")
+
+__all__ = []

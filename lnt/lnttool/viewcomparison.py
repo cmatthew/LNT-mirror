@@ -1,20 +1,7 @@
-import logging
-import os
-import shutil
-import sys
-import tempfile
-import thread
-import time
-import urllib
-import webbrowser
-from optparse import OptionParser
-import contextlib
-
-from lnt.util.ImportData import import_and_report
-from lnt.testing.util.commands import note, warning
+import click
 
 
-def start_browser(url, debug=False):
+def _start_browser(url, debug=False):
     def url_is_up(url):
         try:
             o = urllib.urlopen(url)
@@ -25,7 +12,7 @@ def start_browser(url, debug=False):
 
     # Wait for server to start...
     if debug:
-        note('waiting for server to start...')
+        logger.info('waiting for server to start...')
     for i in range(10000):
         if url_is_up(url):
             break
@@ -34,51 +21,51 @@ def start_browser(url, debug=False):
             sys.stderr.flush()
         time.sleep(.01)
     else:
-        warning('unable to detect that server started')
-                
+        logger.warning('unable to detect that server started')
+
     if debug:
-        note('opening webbrowser...')
+        logger.info('opening webbrowser...')
     webbrowser.open(url)
 
 
-def action_view_comparison(name, args):
+@click.command("view-comparison")
+@click.argument("report_a", type=click.Path(exists=True))
+@click.argument("report_b", type=click.Path(exists=True))
+@click.option("--hostname", default="localhost", show_default=True,
+              help="host interface to use")
+@click.option("--port", default=8000, show_default=True,
+              help="local port to use")
+@click.option("--dry-run", is_flag=True,
+              help="do a dry run through the comparison")
+@click.option("--testsuite", "-s", default='nts')
+def action_view_comparison(report_a, report_b, hostname, port, dry_run,
+                           testsuite):
     """view a report comparison using a temporary server"""
-
+    from .common import init_logger
+    from lnt.util import logger
+    from lnt.util.ImportData import import_and_report
+    import contextlib
+    import lnt.server.db.migrate
     import lnt.server.instance
     import lnt.server.ui.app
-    import lnt.server.db.migrate
+    import logging
+    import os
+    import shutil
+    import sys
+    import tempfile
+    import thread
+    import time
+    import urllib
+    import webbrowser
 
-    parser = OptionParser("%s [options] <report A> <report B>" % (name,))
-    parser.add_option("", "--hostname", dest="hostname", type=str,
-                      help="host interface to use [%default]",
-                      default='localhost')
-    parser.add_option("", "--port", dest="port", type=int, metavar="N",
-                      help="local port to use [%default]", default=8000)
-    parser.add_option("", "--dry-run", dest="dry_run",
-                      help="Do a dry run through the comparison. [%default]"
-                      " [%default]", action="store_true", default=False)
-    (opts, args) = parser.parse_args(args)
-
-    if len(args) != 2:
-        parser.error("invalid number of arguments")
-
-    report_a_path, report_b_path = args
-
-    # Set up the default logger.
-    logger = logging.getLogger("lnt")
-    logger.setLevel(logging.ERROR)
-    handler = logging.StreamHandler(sys.stderr)
-    handler.setFormatter(logging.Formatter(
-        '%(asctime)s %(levelname)s: %(message)s',
-        datefmt='%Y-%m-%d %H:%M:%S'))
-    logger.addHandler(handler)
+    init_logger(logging.ERROR)
 
     # Create a temporary directory to hold the instance.
     tmpdir = tempfile.mkdtemp(suffix='lnt')
 
     try:
         # Create a temporary instance.
-        url = 'http://%s:%d' % (opts.hostname, opts.port)
+        url = 'http://%s:%d' % (hostname, port)
         db_path = os.path.join(tmpdir, 'data.db')
         db_info = lnt.server.config.DBInfo(
             'sqlite:///%s' % (db_path,), '0.4', None,
@@ -86,7 +73,8 @@ def action_view_comparison(name, args):
         # _(self, name, zorgURL, dbDir, tempDir,
         # profileDir, secretKey, databases, blacklist):
         config = lnt.server.config.Config('LNT', url, db_path, tmpdir,
-                                          None, "Not secret key.", {'default': db_info},
+                                          None, "Not secret key.",
+                                          {'default': db_info}, None,
                                           None)
         instance = lnt.server.instance.Instance(None, config)
 
@@ -95,25 +83,23 @@ def action_view_comparison(name, args):
 
         # Import the two reports.
         with contextlib.closing(config.get_database('default')) as db:
-            import_and_report(
-                config, 'default', db, report_a_path,
-                '<auto>', commit=True)
-            import_and_report(
-                config, 'default', db, report_b_path,
-                '<auto>', commit=True)
+            r = import_and_report(config, 'default', db, report_a, '<auto>',
+                                  testsuite, commit=True, updateMachine=True)
+            import_and_report(config, 'default', db, report_b, '<auto>',
+                              testsuite, commit=True, updateMachine=True)
 
             # Dispatch another thread to start the webbrowser.
             comparison_url = '%s/v4/nts/2?compare_to=1' % (url,)
-            note("opening comparison view: %s" % (comparison_url,))
-            
-            if not opts.dry_run:
-                thread.start_new_thread(start_browser, (comparison_url, True))
+            logger.info("opening comparison view: %s" % (comparison_url,))
+
+            if not dry_run:
+                thread.start_new_thread(_start_browser, (comparison_url, True))
 
             # Run the webserver.
             app = lnt.server.ui.app.App.create_with_instance(instance)
             app.debug = True
-            
-            if opts.dry_run:
+
+            if dry_run:
                 # Don't catch out exceptions.
                 app.testing = True
                 # Create a test client.
@@ -121,6 +107,6 @@ def action_view_comparison(name, args):
                 response = client.get(comparison_url)
                 assert response.status_code == 200, "Page did not return 200."
             else:
-                app.run(opts.hostname, opts.port, use_reloader=False)
+                app.run(hostname, port, use_reloader=False)
     finally:
         shutil.rmtree(tmpdir)

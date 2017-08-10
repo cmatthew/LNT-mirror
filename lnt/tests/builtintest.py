@@ -11,12 +11,22 @@ import lnt.util.ServerUtil as ServerUtil
 import lnt.util.ImportData as ImportData
 import lnt.server.config as server_config
 import lnt.server.db.v4db
-import lnt.server.config
+
+
+class OptsContainer(object):
+    pass
 
 
 class BuiltinTest(object):
     def __init__(self):
+        self.opts = OptsContainer()
         pass
+
+    def _fatal(self, msg):
+        """This simulate the output provided by OptionParser.error"""
+        prog_name = os.path.basename(sys.argv[0])
+        sys.stderr.write("%s error: %s\n" % (prog_name, msg))
+        sys.exit(2)
 
     def describe(self):
         """"describe() -> str
@@ -24,7 +34,7 @@ class BuiltinTest(object):
         Return a short description of the test.
         """
 
-    def run_test(self, name, args):
+    def run_test(self, opts):
         """run_test(name, args) -> lnt.testing.Report
 
         Execute the test (accessed via name, for use in the usage message) with
@@ -46,7 +56,7 @@ class BuiltinTest(object):
         if output_stream is not sys.stdout:
             output_stream.close()
 
-    def submit(self, report_path, config, commit=True):
+    def submit(self, report_path, config, ts_name=None, commit=True):
         """Submit the results file to the server.  If no server
         was specified, use a local mock server.
 
@@ -59,27 +69,24 @@ class BuiltinTest(object):
         """
         assert os.path.exists(report_path), "Failed report should have" \
             " never gotten here!"
+        assert ts_name is not None
 
         server_report = None
         if config.submit_url is not None:
             self.log("submitting result to %r" % (config.submit_url,))
-            server_report = ServerUtil.submitFile(config.submit_url,
-                                                  report_path,
-                                                  commit,
-                                                  config.verbose)
+            server_report = ServerUtil.submitFile(
+                config.submit_url, report_path, commit, config.verbose,
+                updateMachine=config.update_machine, mergeRun=config.merge)
         else:
-            # Simulate a submission to retrieve the results report.
-
-            # Construct a temporary database and import the result.
-            self.log("submitting result to dummy instance")
-
-            db = lnt.server.db.v4db.V4DB("sqlite:///:memory:",
-                                         server_config.Config.dummy_instance())
-            server_report = ImportData.import_and_report(
-                None, None, db, report_path, 'json', commit)
-
-        assert server_report is not None, "Results were not submitted."
+            server_report = lnt.util.ImportData.no_submit()
 
         ImportData.print_report_result(server_report, sys.stdout, sys.stderr,
                                        config.verbose)
         return server_report
+
+    @staticmethod
+    def show_results_url(server_results):
+        """Print the result URL"""
+        result_url = server_results.get('result_url', None)
+        if result_url is not None:
+            print "Results available at:", server_results['result_url']

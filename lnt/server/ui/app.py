@@ -6,13 +6,18 @@ import time
 import traceback
 from logging import Formatter
 
+import datetime
 import flask
 import jinja2
 from flask import current_app
 from flask import g
 from flask import session
+from flask import request
+from flask import jsonify
+from flask import render_template
 from flask_restful import Api
 from sqlalchemy.exc import DatabaseError
+from sqlalchemy.ext.declarative import DeclarativeMeta
 
 import lnt
 import lnt.server.db.rules_manager
@@ -24,7 +29,7 @@ import lnt.server.ui.profile_views
 import lnt.server.ui.regression_views
 import lnt.server.ui.views
 from lnt.server.ui.api import load_api_resources
-from lnt.testing.util.commands import warning, error
+from lnt.util import logger
 
 
 class RootSlashPatchMiddleware(object):
@@ -36,6 +41,37 @@ class RootSlashPatchMiddleware(object):
             return flask.redirect(environ['SCRIPT_NAME'] + '/')(
                 environ, start_response)
         return self.app(environ, start_response)
+
+
+class LNTObjectJSONEncoder(flask.json.JSONEncoder):
+    """Take SQLAlchemy objects and jsonify them. If the object has an __json__
+    method, use that instead."""
+
+    def __init__(self,  *args, **kwargs):
+        super(LNTObjectJSONEncoder, self).__init__(*args, **kwargs)
+
+    def default(self, obj):
+        if hasattr(obj, '__json__'):
+            return obj.__json__()
+        if type(obj) is datetime.datetime:
+            return obj.isoformat()
+        if isinstance(obj.__class__, DeclarativeMeta):
+            fields = {}
+            for field in [x for x in dir(obj)
+                          if not x.startswith('_') and x != 'metadata']:
+                data = obj.__getattribute__(field)
+                if isinstance(data, datetime.datetime):
+                    fields[field] = data.isoformat()
+                else:
+                    try:
+                        flask.json.dumps(data)
+                        fields[field] = data
+                    except TypeError:
+                        fields[field] = None
+
+            return fields
+
+        return flask.json.JSONEncoder.default(self, obj)
 
 
 class Request(flask.Request):
@@ -54,16 +90,18 @@ class Request(flask.Request):
         """
         get_db() -> <db instance>
 
-        Get the active database and add a logging handler if part of the request
-        arguments.
+        Get the active database and add a logging handler if part of the
+        request arguments.
         """
 
         if self.db is None:
             echo = bool(self.args.get('db_log') or self.form.get('db_log'))
             try:
-                self.db = current_app.old_config.get_database(g.db_name, echo=echo)
+                self.db = current_app.old_config.get_database(g.db_name,
+                                                              echo=echo)
             except DatabaseError:
-                self.db = current_app.old_config.get_database(g.db_name, echo=echo)
+                self.db = current_app.old_config.get_database(g.db_name,
+                                                              echo=echo)
             # Enable SQL logging with db_log.
             #
             # FIXME: Conditionalize on an is_production variable.
@@ -93,7 +131,7 @@ class Request(flask.Request):
     def close(self):
         t = self.elapsed_time()
         if t > 10:
-            warning("Request {} took {}s".format(self.url, t))
+            logger.warning("Request {} took {}s".format(self.url, t))
         db = getattr(self, 'db', None)
         if db is not None:
             db.close()
@@ -104,7 +142,7 @@ class LNTExceptionLoggerFlask(flask.Flask):
     def log_exception(self, exc_info):
         # We need to stringify the traceback, since logs are sent via
         # pickle.
-        error("Exception: " + traceback.format_exc())
+        logger.error("Exception: " + traceback.format_exc())
 
 
 class App(LNTExceptionLoggerFlask):
@@ -113,6 +151,7 @@ class App(LNTExceptionLoggerFlask):
         # Construct the application.
         app = App(__name__)
 
+        app.json_encoder = LNTObjectJSONEncoder
         # Register additional filters.
         create_jinja_environment(app.jinja_env)
 
@@ -123,7 +162,7 @@ class App(LNTExceptionLoggerFlask):
         app.load_config(instance)
 
         # Load the application routes.
-        app.register_module(lnt.server.ui.views.frontend)
+        app.register_blueprint(lnt.server.ui.views.frontend)
 
         # Load the flaskRESTful API.
         app.api = Api(app)
@@ -133,6 +172,30 @@ class App(LNTExceptionLoggerFlask):
         def set_session():
             """Make our session cookies last."""
             session.permanent = True
+
+        @app.errorhandler(404)
+        def page_not_found(e):
+            message = "{}: {}".format(e.name, e.description)
+            if request.accept_mimetypes.accept_json and \
+                    not request.accept_mimetypes.accept_html:
+                response = jsonify({
+                    'error': 'The page you are looking for does not exist.',
+                })
+                response.status_code = 404
+                return response
+            return render_template('error.html', message=message), 404
+
+        @app.errorhandler(500)
+        def internal_server_error(e):
+            if request.accept_mimetypes.accept_json and \
+                    not request.accept_mimetypes.accept_html:
+                response = jsonify({
+                    'error': 'internal server error',
+                    'message': repr(e),
+                })
+                response.status_code = 500
+                return response
+            return render_template('error.html', message=repr(e)), 500
 
         return app
 
@@ -177,11 +240,12 @@ class App(LNTExceptionLoggerFlask):
         """
         # Print to screen.
         ch = logging.StreamHandler()
-        ch.setLevel(logging.DEBUG)
+        ch.setLevel(logging.INFO)
         self.logger.addHandler(ch)
 
         # Log to mem for the /log view.
-        h = logging.handlers.MemoryHandler(1024 * 1024, flushLevel=logging.CRITICAL)
+        h = logging.handlers.MemoryHandler(1024 * 1024,
+                                           flushLevel=logging.CRITICAL)
         h.setLevel(logging.DEBUG)
         self.logger.addHandler(h)
         # Also store the logger, so we can render the buffer in it.
@@ -199,7 +263,8 @@ class App(LNTExceptionLoggerFlask):
                 rotating.setLevel(logging.DEBUG)
                 self.logger.addHandler(rotating)
             except (OSError, IOError) as e:
-                print >> sys.stderr, "Error making log file", LOG_FILENAME, str(e)
+                print >> sys.stderr, "Error making log file", \
+                                     LOG_FILENAME, str(e)
                 print >> sys.stderr, "Will not log to file."
             else:
                 self.logger.info("Started file logging.")

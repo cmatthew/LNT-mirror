@@ -1,15 +1,10 @@
 """
 Utilities for helping with the analysis of data, for reporting purposes.
 """
-
-import logging
-
+from lnt.util import logger
 from lnt.util import stats
 from lnt.server.ui import util
 from lnt.testing import FAIL
-
-LOGGER_NAME = "lnt.server.ui.app"
-logger = logging.getLogger(LOGGER_NAME)
 
 REGRESSED = 'REGRESSED'
 IMPROVED = 'IMPROVED'
@@ -64,8 +59,8 @@ class ComparisonResult:
                  confidence_lv=0.05, bigger_is_better=False):
         self.aggregation_fn = aggregation_fn
 
-        # Special case: if we're using the minimum to aggregate, swap it for max
-        # if bigger_is_better.
+        # Special case: if we're using the minimum to aggregate, swap it for
+        # max if bigger_is_better.
         if aggregation_fn == stats.safe_min and bigger_is_better:
             aggregation_fn = stats.safe_max
 
@@ -135,7 +130,7 @@ class ComparisonResult:
                           self.prev_samples,
                           self.confidence_lv,
                           bool(self.bigger_is_better))
-                          
+
     def __json__(self):
         simple_dict = self.__dict__
         simple_dict['aggregation_fn'] = self.aggregation_fn.__name__
@@ -185,15 +180,15 @@ class ComparisonResult:
         #
         # FIXME: One bug here is that we risk losing performance data on tests
         # which flop to failure then back. What would be nice to do here is to
-        # find the last value in a passing run, or to move to using proper keyed
-        # reference runs.
+        # find the last value in a passing run, or to move to using proper
+        # keyed reference runs.
         if self.failed:
             return UNCHANGED_FAIL
         elif self.prev_failed:
-            return UNCHANGED_PASS 
+            return UNCHANGED_PASS
 
-        # Always ignore percentage changes below 1%, for now, we just don't have
-        # enough time to investigate that level of stuff.
+        # Always ignore percentage changes below 1%, for now, we just don't
+        # have enough time to investigate that level of stuff.
         if ignore_small and abs(self.pct_delta) < min_pct_delta:
             return UNCHANGED_PASS
 
@@ -204,8 +199,8 @@ class ComparisonResult:
         if ignore_small and abs(self.delta) < .01:
             return UNCHANGED_PASS
 
-        # Ignore tests whose delta is too small relative to the precision we can
-        # sample at; otherwise quantization means that we can't measure the
+        # Ignore tests whose delta is too small relative to the precision we
+        # can sample at; otherwise quantization means that we can't measure the
         # standard deviation with enough accuracy.
         if abs(self.delta) <= 2 * value_precision * confidence_interval:
             return UNCHANGED_PASS
@@ -273,12 +268,14 @@ class RunInfo(object):
         This query is expensive.
         """
         runs = [run]
-        runs_prev = self.testsuite.get_previous_runs_on_machine(run, num_comparison_runs)
+        runs_prev = self.testsuite \
+            .get_previous_runs_on_machine(run, num_comparison_runs)
         runs += runs_prev
 
         if compare_run is not None:
             compare_runs = [compare_run]
-            comp_prev = self.testsuite.get_previous_runs_on_machine(compare_run, num_comparison_runs)
+            comp_prev = self.testsuite \
+                .get_previous_runs_on_machine(compare_run, num_comparison_runs)
             compare_runs += comp_prev
         else:
             compare_runs = []
@@ -316,10 +313,11 @@ class RunInfo(object):
         if runs:
             cur_profile = self.profile_map.get((runs[0].id, test_id), None)
         if compare_runs:
-            prev_profile = self.profile_map.get((compare_runs[0].id, test_id), None)
-        
-        # Determine whether this (test,pset) passed or failed in the current and
-        # previous runs.
+            prev_profile = self.profile_map.get((compare_runs[0].id, test_id),
+                                                None)
+
+        # Determine whether this (test,pset) passed or failed in the current
+        # and previous runs.
         #
         # FIXME: Support XFAILs and non-determinism (mixed fail and pass)
         # better.

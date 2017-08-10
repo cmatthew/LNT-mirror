@@ -7,7 +7,6 @@ Define facilities for automatically upgrading databases.
 # version'. This was done in case we need to add some kind of migration
 # functionality for the individual test suites, which is not unreasonable.
 
-import logging
 import os
 import re
 
@@ -16,6 +15,8 @@ import sqlalchemy.ext.declarative
 import sqlalchemy.orm
 from sqlalchemy import Column, String, Integer
 
+
+from lnt.util import logger
 import lnt.server.db.util
 
 ###
@@ -23,9 +24,9 @@ import lnt.server.db.util
 
 Base = sqlalchemy.ext.declarative.declarative_base()
 
+
 class SchemaVersion(Base):
     __tablename__ = 'SchemaVersion'
-    __table_args__ = {'mysql_charset': 'utf8', 'mysql_engine': 'InnoDB'}
 
     name = Column("Name", String(256), primary_key=True, unique=True)
     version = Column("Version", Integer)
@@ -39,6 +40,7 @@ class SchemaVersion(Base):
 
 ###
 # Migrations auto-discovery.
+
 
 def _load_migrations():
     """
@@ -65,7 +67,8 @@ def _load_migrations():
         schema_migrations = {}
         for item in os.listdir(schema_migrations_path):
             # Ignore certain known non-scripts.
-            if item in ('README.txt', '__init__.py') or item.endswith('.pyc'):
+            if item in ('README.txt', '__init__.py', 'new_suite.py',
+                        'util.py') or item.endswith('.pyc'):
                 continue
 
             # Ignore non-matching files.
@@ -77,7 +80,7 @@ def _load_migrations():
                 continue
 
             # Check the version numbers for validity.
-            version,next_version = map(int, m.groups())
+            version, next_version = map(int, m.groups())
             if next_version != version + 1:
                 logger.error(
                     "invalid script name %r in schema migration directory: %r",
@@ -114,7 +117,22 @@ def _load_migrations():
 
 logger = logging.getLogger(__name__)
 
-def update_schema(engine, session, versions, available_migrations, schema_name):
+def _set_schema_version(engine, schema_name, new_version):
+    # Keep the updating to a single transaction that is immediately committed.
+    session = sqlalchemy.orm.sessionmaker(engine)()
+    schema_version = session.query(SchemaVersion) \
+                            .filter(SchemaVersion.name == schema_name) \
+                            .first()
+    if schema_version is None:
+        schema_version = SchemaVersion(schema_name, new_version)
+    else:
+        schema_version.version = new_version
+    session.add(schema_version)
+    session.commit()
+    session.close()
+
+
+def update_schema(engine, versions, available_migrations, schema_name):
     schema_migrations = available_migrations[schema_name]
 
     # Get the current schema version.
@@ -125,33 +143,28 @@ def update_schema(engine, session, versions, available_migrations, schema_name):
     if db_version is None:
         logger.info("assigning initial version for schema %r",
                     schema_name)
-        db_version = SchemaVersion(schema_name, 0)
-        session.add(db_version)
-        session.commit()
+        _set_schema_version(engine, schema_name, 0)
+        db_version = 0
 
     # If we are up-to-date, do nothing.
-    if db_version.version == current_version:
+    if db_version == current_version:
         return False
 
     # Otherwise, update the database.
-    if db_version.version > current_version:
+    if db_version > current_version:
         logger.error("invalid schema %r version %r (greater than current)",
                      schema_name, db_version)
         return False
 
     logger.info("updating schema %r from version %r to current version %r",
-                schema_name, db_version.version, current_version)
-    while db_version.version < current_version:
+                schema_name, db_version, current_version)
+    while db_version < current_version:
         # Lookup the upgrade function for this version.
-        upgrade_script = schema_migrations[db_version.version]
+        upgrade_script = schema_migrations[db_version]
 
         globals = {}
         execfile(upgrade_script, globals)
         upgrade_method = globals['upgrade']
-
-        # Make sure we don't have any transactions lingering when executing
-        # the upgrade script.
-        session.close_all()
 
         # Execute the upgrade.
         #
@@ -159,75 +172,41 @@ def update_schema(engine, session, versions, available_migrations, schema_name):
         #
         # FIXME: Execute this inside a transaction?
         logger.info("applying upgrade for version %d to %d" % (
-                db_version.version, db_version.version+1))
+                db_version, db_version+1))
         upgrade_method(engine)
 
         # Update the schema version.
-        db_version.version += 1
-        session.add(db_version)
-
-        # Commit the result.
-        session.commit()
+        db_version += 1
+        _set_schema_version(engine, schema_name, db_version)
 
     return True
+
 
 def update(engine):
     any_changed = False
 
-    logger.debug("checking database versions...")
-
     # Load the available migrations.
     available_migrations = _load_migrations()
 
-    # Create a session for our queries.
+    Base.metadata.create_all(engine)
+
     session = sqlalchemy.orm.sessionmaker(engine)()
+    version_list = session.query(SchemaVersion).all()
+    session.close()
 
-    def will_not_handle_error(e):
-        message = e.orig.message
-        if 'no such table' in message:
-            return False
-        if 'Table' in str(message) and "doesn't exist" in str(message):
-            return False
-        if 'relation' in message and 'does not exist' in message:
-            return False
-        return False
-
-    # Load all the information from the versions tables. We just do the query
-    # and handle the exception if the table hasn't been defined yet (for
-    # databases before versioning started).
-    try:
-        version_list = session.query(SchemaVersion).all()
-    except (sqlalchemy.exc.OperationalError,
-            sqlalchemy.exc.ProgrammingError) as e:
-
-        # Filter on the DB-API error message. This is a bit flimsy, but works
-        # for SQLite and PostgresSQL at least.
-        if will_not_handle_error(e):
-            raise
-
-        # Create the SchemaVersion table.
-        Base.metadata.create_all(engine)
-        session.commit()
-
-        # Certain databases like PostgreSQL use ``isolated''
-        # transactions, i.e., we will be unable to insert data. Thus
-        # to ensure that no matter the settings, i.e. whether or not
-        # autocommit is set, we create a new session.
-        session = sqlalchemy.orm.sessionmaker(engine)()
-
-        version_list = []
-    versions = dict((v.name, v)
+    versions = dict((v.name, v.version)
                     for v in version_list)
 
     # Update the core schema.
-    any_changed |= update_schema(engine, session, versions,
+    any_changed |= update_schema(engine, versions,
                                  available_migrations, '__core__')
 
     if any_changed:
         logger.info("database auto-upgraded")
 
+
 def update_path(path):
-    # If the path includes no database type, assume sqlite.    
+    # If the path includes no database type, assume sqlite.
     if lnt.server.db.util.path_has_no_database_type(path):
         path = 'sqlite:///' + path
 

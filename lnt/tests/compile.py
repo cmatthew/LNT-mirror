@@ -1,3 +1,4 @@
+"""Single file compile-time performance testing"""
 import errno
 import hashlib
 import json
@@ -13,15 +14,17 @@ import logging
 from datetime import datetime
 import collections
 
-import builtintest
-from optparse import OptionParser, OptionGroup
+import click
 
 import lnt.testing
 import lnt.testing.util.compilers
-from lnt.testing.util.commands import note, fatal, resolve_command_path
-from lnt.testing.util.misc import timestamp
 from lnt.testing.util import commands, machineinfo
+from lnt.testing.util.commands import fatal, resolve_command_path
+from lnt.testing.util.misc import timestamp
+from lnt.tests import builtintest
 from lnt.util import stats
+from lnt.util import logger
+from lnt.lnttool.common import submit_options
 
 
 # For each test, compile with all these combinations of flags.
@@ -33,6 +36,8 @@ DEFAULT_FLAGS_TO_TEST = [('-O0',),
                          ('-O3', '-g'),
                          ('-Oz',),
                          ('-Oz', '-g')]
+
+opts = None
 
 
 def args_to_quoted_string(args):
@@ -331,8 +336,6 @@ def test_build(base_name, run_info, variables, project, build_config, num_jobs,
                    "-- stdout --\n%s\n"
                    "-- stderr --\n%s\n") % (archive_path, source_path,
                                             stdout, stderr))
-        if p.wait() != 0:
-            fatal
 
         # Apply the patch file, if necessary.
         patch_files = project.get('patch_files', [])
@@ -701,155 +704,35 @@ We run each of the compile time tests in various stages:
 
 
 class CompileTest(builtintest.BuiltinTest):
-    def describe(self):
-        return 'Single file compile-time performance testing'
-
-    def run_test(self, name, args):
-        global opts
-        parser = OptionParser(
-            ("%(name)s [options] [<output file>]\n" +
-             usage_info) % locals())
-        parser.add_option("-s", "--sandbox", dest="sandbox_path",
-                          help="Parent directory to build and run tests in",
-                          type=str, default=None, metavar="PATH")
-
-        group = OptionGroup(parser, "Test Options")
-        group.add_option("", "--no-timestamp", dest="timestamp_build",
-                         help="Don't timestamp build directory (for testing)",
-                         action="store_false", default=True)
-        group.add_option("", "--cc", dest="cc", type='str',
-                         help="Path to the compiler under test",
-                         action="store", default=None)
-        group.add_option("", "--cxx", dest="cxx",
-                         help="Path to the C++ compiler to test",
-                         type=str, default=None)
-        group.add_option("", "--ld", dest="ld",
-                         help="Path to the c linker to use. (Xcode Distinction)",
-                         type=str, default=None)
-        group.add_option("", "--ldxx", dest="ldxx",
-                         help="Path to the cxx linker to use. (Xcode Distinction)",
-                         type=str, default=None)
-        group.add_option("", "--runn", dest="runn",
-                         help="Path to runN tool.",
-                         type=str, default="runN")
-        group.add_option("", "--test-externals", dest="test_suite_externals",
-                         help="Path to the LLVM test-suite externals",
-                         type=str, default=None, metavar="PATH")
-        group.add_option("", "--machine-param", dest="machine_parameters",
-                         metavar="NAME=VAL",
-                         help="Add 'NAME' = 'VAL' to the machine parameters",
-                         type=str, action="append", default=[])
-        group.add_option("", "--run-param", dest="run_parameters",
-                         metavar="NAME=VAL",
-                         help="Add 'NAME' = 'VAL' to the run parameters",
-                         type=str, action="append", default=[])
-        group.add_option("", "--run-order", dest="run_order", metavar="STR",
-                         help="String to use to identify and order this run",
-                         action="store", type=str, default=None)
-        group.add_option("", "--test-subdir", dest="test_subdir",
-                         help="Subdirectory of test external dir to look for tests in.",
-                         type=str, default="lnt-compile-suite-src")
-        parser.add_option_group(group)
-
-        group = OptionGroup(parser, "Test Selection")
-        group.add_option("", "--no-memory-profiling", dest="memory_profiling",
-                         help="Disable memory profiling",
-                         action="store_false", default=True)
-        group.add_option("", "--multisample", dest="run_count", metavar="N",
-                         help="Accumulate test data from multiple runs",
-                         action="store", type=int, default=3)
-        group.add_option("", "--min-sample-time", dest="min_sample_time",
-                         help="Ensure all tests run for at least N seconds",
-                         metavar="N", action="store", type=float, default=.5)
-        group.add_option("", "--save-temps", dest="save_temps",
-                         help="Save temporary build output files",
-                         action="store_true", default=False)
-        group.add_option("", "--show-tests", dest="show_tests",
-                         help="Only list the availables tests that will be run",
-                         action="store_true", default=False)
-        group.add_option("", "--test", dest="tests", metavar="NAME",
-                         help="Individual test to run",
-                         action="append", default=[])
-        group.add_option("", "--test-filter", dest="test_filters",
-                         help="Run tests matching the given pattern",
-                         metavar="REGEXP", action="append", default=[])
-        group.add_option("", "--flags-to-test", dest="flags_to_test",
-                         help="Add a set of flags to test (space separated)",
-                         metavar="FLAGLIST", action="append", default=[])
-        group.add_option("", "--jobs-to-test", dest="jobs_to_test",
-                         help="Add a job count to test (full builds)",
-                         metavar="NUM", action="append", default=[], type=int)
-        group.add_option("", "--config-to-test", dest="configs_to_test",
-                         help="Add build configuration to test (full builds)",
-                         metavar="NAME", action="append", default=[],
-                         choices=('Debug', 'Release'))
-        parser.add_option_group(group)
-
-        group = OptionGroup(parser, "Output Options")
-        group.add_option("", "--no-machdep-info", dest="use_machdep_info",
-                         help=("Don't put machine (instance) dependent "
-                               "variables in machine info"),
-                         action="store_false", default=True)
-        group.add_option("", "--machine-name", dest="machine_name", type='str',
-                         help="Machine name to use in submission [%default]",
-                         action="store", default=platform.uname()[1])
-        group.add_option("", "--submit", dest="submit_url", metavar="URLORPATH",
-                         help=("autosubmit the test result to the given server "
-                               "(or local instance) [%default]"),
-                         type=str, default=None)
-        group.add_option("", "--commit", dest="commit",
-                         help=("whether the autosubmit result should be committed "
-                               "[%default]"),
-                         type=int, default=True)
-        group.add_option("", "--output", dest="output", metavar="PATH",
-                         help="write raw report data to PATH (or stdout if '-')",
-                         action="store", default=None)
-        group.add_option("-v", "--verbose", dest="verbose",
-                         help="show verbose test results",
-                         action="store_true", default=False)
-
-        parser.add_option_group(group)
-
-        opts, args = parser.parse_args(args)
-
-        if len(args) != 0:
-            parser.error("invalid number of arguments")
-
-        if opts.cc is None:
-            parser.error("You must specify a --cc argument.")
+    def run_test(self, opts):
 
         # Resolve the cc_under_test path.
         opts.cc = resolve_command_path(opts.cc)
 
         if not lnt.testing.util.compilers.is_valid(opts.cc):
-            parser.error('--cc does not point to a valid executable.')
+            self._fatal('--cc does not point to a valid executable.')
 
         # Attempt to infer the cxx compiler if not given.
         if opts.cc and opts.cxx is None:
             opts.cxx = lnt.testing.util.compilers.infer_cxx_compiler(opts.cc)
             if opts.cxx is not None:
-                note("inferred C++ compiler under test as: %r" % (opts.cxx,))
+                logger.info("inferred C++ compiler under test as: %r" %
+                            (opts.cxx,))
 
-        # Validate options.
-        if opts.cc is None:
-            parser.error('--cc is required')
         if opts.cxx is None:
-            parser.error('--cxx is required (and could not be inferred)')
-        if opts.sandbox_path is None:
-            parser.error('--sandbox is required')
-        if opts.test_suite_externals is None:
-            parser.error("--test-externals option is required")
+            self._fatal('--cxx is required (and could not be inferred)')
+
 
         # Force the CC and CXX variables to be absolute paths.
         cc_abs = os.path.abspath(commands.which(opts.cc))
         cxx_abs = os.path.abspath(commands.which(opts.cxx))
 
         if not os.path.exists(cc_abs):
-            parser.error("unable to determine absolute path for --cc: %r" % (
-                         opts.cc,))
+            self._fatal("unable to determine absolute path for --cc: %r" % (
+                opts.cc,))
         if not os.path.exists(cxx_abs):
-            parser.error("unable to determine absolute path for --cc: %r" % (
-                         opts.cc,))
+            self._fatal("unable to determine absolute path for --cc: %r" % (
+                opts.cc,))
         opts.cc = cc_abs
         opts.cxx = cxx_abs
 
@@ -878,8 +761,8 @@ class CompileTest(builtintest.BuiltinTest):
             os.mkdir(g_output_dir)
         except OSError as e:
             if e.errno == errno.EEXIST:
-                parser.error("sandbox output directory %r already exists!" % (
-                             g_output_dir,))
+                self._fatal("sandbox output directory %r already exists!" % (
+                    g_output_dir,))
             else:
                 raise
 
@@ -946,20 +829,21 @@ class CompileTest(builtintest.BuiltinTest):
         else:
             # Otherwise, use the inferred run order.
             variables['run_order'] = cc_info['inferred_run_order']
-            note("inferred run order to be: %r" % (variables['run_order'],))
+            logger.info("inferred run order to be: %r" %
+                        (variables['run_order'],))
 
         if opts.verbose:
             format = pprint.pformat(variables)
             msg = '\n\t'.join(['using variables:'] + format.splitlines())
-            note(msg)
+            logger.info(msg)
 
             format = pprint.pformat(machine_info)
             msg = '\n\t'.join(['using machine info:'] + format.splitlines())
-            note(msg)
+            logger.info(msg)
 
             format = pprint.pformat(run_info)
             msg = '\n\t'.join(['using run info:'] + format.splitlines())
-            note(msg)
+            logger.info(msg)
 
         # Compute the set of flags to test.
         if not opts.flags_to_test:
@@ -1003,9 +887,9 @@ class CompileTest(builtintest.BuiltinTest):
             requested_tests = set(opts.tests)
             missing_tests = requested_tests - all_test_names
             if missing_tests:
-                    parser.error(("invalid test names %s, use --show-tests to "
-                                  "see available tests") %
-                                 (", ".join(map(repr, missing_tests)), ))
+                self._fatal(("invalid test names %s, use --show-tests to "
+                             "see available tests") %
+                            (", ".join(map(repr, missing_tests)), ))
 
             # Validate the test filters.
             test_filters = [re.compile(pattern)
@@ -1019,7 +903,7 @@ class CompileTest(builtintest.BuiltinTest):
                                  for filter in test_filters
                                  if filter.search(test[0])])]
         if not tests_to_run:
-            parser.error(
+            self._fatal(
                 "no tests requested (invalid --test or --test-filter options)!")
 
         # Ensure output directory is available.
@@ -1035,6 +919,7 @@ class CompileTest(builtintest.BuiltinTest):
         g_log.info('run started')
         g_log.info('using CC: %r' % opts.cc)
         g_log.info('using CXX: %r' % opts.cxx)
+        no_errors = True
         for basename, test_fn in tests_to_run:
             for success, name, samples in test_fn(basename, run_info,
                                                   variables):
@@ -1051,11 +936,12 @@ class CompileTest(builtintest.BuiltinTest):
                 test_name = '%s.%s' % (tag, name)
                 if not success:
                     testsamples.append(lnt.testing.TestSamples(
-                                       test_name + '.status',
-                                       [lnt.testing.FAIL]))
+                        test_name + '.status', [lnt.testing.FAIL]))
+                    no_errors = False
                 if samples:
                     testsamples.append(lnt.testing.TestSamples(
-                                       test_name, samples))
+                        test_name, samples))
+        run_info['no_errors'] = no_errors
         end_time = datetime.utcnow()
 
         g_log.info('run complete')
@@ -1075,12 +961,113 @@ class CompileTest(builtintest.BuiltinTest):
         if opts.output is not None:
             self.print_report(report, opts.output)
 
-        server_report = self.submit(lnt_report_path, opts)
+        server_report = self.submit(lnt_report_path, opts, ts_name='compile')
 
         return server_report
 
+# FIXME: an equivalent to argparse's add_argument_group is not implemented
+#        on click. Need to review it when such functionality is available.
+#        https://github.com/pallets/click/issues/373
+@click.command("compile", help=usage_info, short_help=__doc__)
+@click.argument("label", default=platform.uname()[1], required=False,
+                type=click.UNPROCESSED)
+@click.option("-s", "--sandbox", "sandbox_path", required=True,
+              help="Parent directory to build and run tests in",
+              type=click.UNPROCESSED, default=None, metavar="PATH")
+#  Test Options
+@click.option("--no-timestamp", "timestamp_build",
+              help="Don't timestamp build directory (for testing)",
+              flag_value=False, default=True)
+@click.option("--cc", "cc", type=click.UNPROCESSED, required=True,
+              help="Path to the compiler under test")
+@click.option("--cxx", "cxx",
+              help="Path to the C++ compiler to test",
+              type=click.UNPROCESSED, default=None)
+@click.option("--ld", "ld",
+              help="Path to the c linker to use. (Xcode Distinction)",
+              type=click.UNPROCESSED, default=None)
+@click.option("--ldxx", "ldxx",
+              help="Path to the cxx linker to use. (Xcode Distinction)",
+              type=click.UNPROCESSED, default=None)
+@click.option("--runn", "runn",
+              help="Path to runN tool.",
+              type=click.UNPROCESSED, default="runN")
+@click.option("--test-externals", "test_suite_externals", required=True,
+              help="Path to the LLVM test-suite externals",
+              type=click.UNPROCESSED, default=None, metavar="PATH")
+@click.option("--machine-param", "machine_parameters",
+              metavar="NAME=VAL",
+              help="Add 'NAME' = 'VAL' to the machine parameters",
+              type=click.UNPROCESSED, multiple=True, default=[])
+@click.option("--run-param", "run_parameters",
+              metavar="NAME=VAL",
+              help="Add 'NAME' = 'VAL' to the run parameters",
+              type=click.UNPROCESSED, multiple=True, default=[])
+@click.option("--run-order", "run_order", metavar="STR",
+              help="String to use to identify and order this run",
+              type=click.UNPROCESSED, default=None)
+@click.option("--test-subdir", "test_subdir",
+              help="Subdirectory of test external dir to look for "
+                   "tests in.",
+              type=click.UNPROCESSED, default="lnt-compile-suite-src")
+#  Test Selection
+@click.option("--no-memory-profiling", "memory_profiling",
+              help="Disable memory profiling",
+              flag_value=False, default=True)
+@click.option("--multisample", "run_count", metavar="N",
+              help="Accumulate test data from multiple runs",
+              type=int, default=3)
+@click.option("--min-sample-time", "min_sample_time",
+              help="Ensure all tests run for at least N seconds",
+              metavar="N", type=float, default=.5)
+@click.option("--save-temps", "save_temps",
+              help="Save temporary build output files", is_flag=True)
+@click.option("--show-tests", "show_tests",
+              help="Only list the availables tests that will be run",
+              is_flag=True)
+@click.option("--test", "tests", metavar="NAME",
+              help="Individual test to run",
+              multiple=True, default=[], type=click.UNPROCESSED)
+@click.option("--test-filter", "test_filters",
+              help="Run tests matching the given pattern",
+              metavar="REGEXP", multiple=True, default=[],
+              type=click.UNPROCESSED)
+@click.option("--flags-to-test", "flags_to_test",
+              help="Add a set of flags to test (space separated)",
+              metavar="FLAGLIST", multiple=True, default=[],
+              type=click.UNPROCESSED)
+@click.option("--jobs-to-test", "jobs_to_test",
+              help="Add a job count to test (full builds)",
+              metavar="NUM", multiple=True, default=[], type=int)
+@click.option("--config-to-test", "configs_to_test",
+              help="Add build configuration to test (full builds)",
+              metavar="NAME", multiple=True, default=[],
+              type=click.Choice(['Debug', 'Release']))
+#  Output Options
+@click.option("--no-machdep-info", "use_machdep_info",
+              help=("Don't put machine (instance) dependent "
+                    "variables in machine info"),
+              flag_value=False, default=True)
+@click.option("--machine-name", "machine_name", type=click.UNPROCESSED,
+              help="Machine name to use in submission",
+              default=platform.uname()[1])
+@click.option("--submit", "submit_url", metavar="URLORPATH",
+              help=("autosubmit the test result to the given server "
+                    "(or local instance)"),
+              type=click.UNPROCESSED, default=None)
+@submit_options
+@click.option("--output", "output", metavar="PATH",
+              help="write raw report data to PATH (or stdout if '-')")
+@click.option("-v", "--verbose", "verbose",
+              help="show verbose test results", is_flag=True)
+def cli_action(*args, **kwargs):
+    global opts
 
-def create_instance():
-    return CompileTest()
+    compile_test = CompileTest()
+    opts = compile_test.opts
 
-__all__ = ['create_instance']
+    for key, value in kwargs.items():
+        setattr(compile_test.opts, key, value)
+
+    results = compile_test.run_test(compile_test.opts)
+    compile_test.show_results_url(results)

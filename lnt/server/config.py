@@ -19,7 +19,7 @@ class EmailConfig:
             to_address = [(str(a), str(b)) for a, b in to_address]
         return EmailConfig(bool(data.get('enabled')), str(data.get('host')),
                            str(data.get('from')), to_address)
-        
+
     def __init__(self, enabled, host, from_address, to_address):
         self.enabled = enabled
         self.host = host
@@ -27,8 +27,8 @@ class EmailConfig:
         self.to_address = to_address
 
     def get_to_address(self, machine_name):
-        # The email to_address field can either be a string, or a list of tuples
-        # of the form [(accept-regexp-pattern, to-address)].
+        # The email to_address field can either be a string, or a list of
+        # tuples of the form [(accept-regexp-pattern, to-address)].
         if isinstance(self.to_address, str):
             return self.to_address
 
@@ -39,7 +39,8 @@ class EmailConfig:
 
 class DBInfo:
     @staticmethod
-    def from_data(baseDir, config_data, default_email_config, default_baseline_revision):
+    def from_data(baseDir, config_data, default_email_config,
+                  default_baseline_revision):
         dbPath = config_data.get('path')
 
         # If the path does not contain a database specifier, assume it is a
@@ -67,12 +68,12 @@ class DBInfo:
                       config_data.get('shadow_import', None),
                       email_config,
                       baseline_revision)
-    
+
     @staticmethod
     def dummy_instance():
         return DBInfo("sqlite:///:memory:", "0.4", None,
                       EmailConfig(False, '', '', []), 0)
-    
+
     def __init__(self, path,
                  db_version, shadow_import, email_config,
                  baseline_revision):
@@ -82,7 +83,7 @@ class DBInfo:
         self.shadow_import = shadow_import
         self.email_config = email_config
         self.baseline_revision = baseline_revision
-        
+
     def __str__(self):
         return "DBInfo(" + self.path + ")"
 
@@ -103,13 +104,14 @@ class Config:
 
         dbDir = data.get('db_dir', '.')
         profileDir = data.get('profile_dir', 'data/profiles')
-        
+        schemasDir = os.path.join(baseDir, 'schemas')
         # If the path does not contain database type, assume relative path.
         dbDirPath = dbDir if "://" in dbDir else os.path.join(baseDir, dbDir)
 
         # FIXME: Remove this default.
         tempDir = data.get('tmp_dir', 'viewer/resources/graphs')
         blacklist = data.get('blacklist', None)
+        api_auth_token = data.get('api_auth_token', None)
         if blacklist and baseDir:
             blacklist = os.path.join(baseDir, blacklist)
         else:
@@ -123,18 +125,19 @@ class Config:
                                                  default_email_config,
                                                  0))
                            for k, v in data['databases'].items()]),
-                      blacklist)
-    
+                      blacklist, schemasDir, api_auth_token)
+
     @staticmethod
     def dummy_instance():
         baseDir = tempfile.mkdtemp()
         dbDir = '.'
         profileDirPath = os.path.join(baseDir, 'profiles')
         tempDir = os.path.join(baseDir, 'tmp')
+        schemasDir = os.path.join(baseDir, 'schemas')
         secretKey = None
         dbInfo = {'dummy': DBInfo.dummy_instance()}
         blacklist = None
-        
+
         return Config('LNT',
                       'http://localhost:8000',
                       dbDir,
@@ -142,9 +145,21 @@ class Config:
                       profileDirPath,
                       secretKey,
                       dbInfo,
-                      blacklist)
+                      blacklist,
+                      schemasDir,
+                      "test_key")
 
-    def __init__(self, name, zorgURL, dbDir, tempDir, profileDir, secretKey, databases, blacklist):
+    def __init__(self,
+                 name,
+                 zorgURL,
+                 dbDir,
+                 tempDir,
+                 profileDir,
+                 secretKey,
+                 databases,
+                 blacklist,
+                 schemasDir,
+                 api_auth_token=None):
         self.name = name
         self.zorgURL = zorgURL
         self.dbDir = dbDir
@@ -152,11 +167,13 @@ class Config:
         self.secretKey = secretKey
         self.blacklist = blacklist
         self.profileDir = profileDir
+        self.schemasDir = schemasDir
         while self.zorgURL.endswith('/'):
             self.zorgURL = zorgURL[:-1]
         self.databases = databases
         for db in self.databases.values():
             db.config = self
+        self.api_auth_token = api_auth_token
 
     def get_database(self, name, echo=False):
         """

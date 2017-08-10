@@ -1,4 +1,3 @@
-
 {% import "utils.html" as utils %}
 
 {#
@@ -27,13 +26,13 @@
          {% endfor %}
          </tbody>
        {% else %}
-         <th style="{{ styles['th'] }}">&Delta; {{ metric_field_suffix }}</th>
+         <th style="{{ styles['th'] }}">Δ {{ metric_field_suffix }}</th>
          <th style="{{ styles['th'] }}">{{ metric_name }}</th>
          <th style="{{ styles['th'] }}">Current</th>
-         <th style="{{ styles['th'] }}">&sigma; {{ metric_field_suffix }}</th>
+         <th style="{{ styles['th'] }}">σ {{ metric_field_suffix }}</th>
          {% if secondary_info %}
-         <th style="{{ styles['th'] }}">&Delta; {{ secondary_field_suffix }}</th>
-         <th style="{{ styles['th'] }}">&sigma; {{ secondary_field_suffix }}</th>
+         <th style="{{ styles['th'] }}">Δ {{ secondary_field_suffix }}</th>
+         <th style="{{ styles['th'] }}">σ {{ secondary_field_suffix }}</th>
          {% endif %}
          </tr>
          </thead>
@@ -64,16 +63,9 @@
          </tbody>
        {% endif %}
      </table>
+   </p>
 {% endif %}
 {% endmacro %}
-
-{% if not only_html_body %}
-<html>
-<head>
-   <title>{{ subject }}</title>
-</head>
-<body style="{{ styles['body'] }}">
-{% endif %}
 
 <h1 style="{{ styles['h1'] }}">
   <a href="{{ report_url }}">{{ subject }}</a>
@@ -87,7 +79,7 @@
       <th style="{{ styles['th'] }}">Order</th>
       <th style="{{ styles['th'] }}">Start Time</th>
       <th style="{{ styles['th'] }}">Duration</th>
-      {%- set show_producers = (run and run.parameters.producer) or(compare_to and compare_to.parameters.producer) or (baseline and baseline.parameters.producer) %}
+      {%- set show_producers = (run and 'producer' in run.parameters) or(compare_to and 'producer' in compare_to.parameters) or (baseline and 'producer' in baseline.parameters) %}
       {% if show_producers %}
         <th style="{{ styles['th'] }}">Produced by</th>
       {% endif %}
@@ -102,7 +94,9 @@
       <td style="{{ styles['td'] }}"><span class="utctime">{{ r.start_time.isoformat() }}</span></td>
       <td style="{{ styles['td'] }}">{{ r.end_time - r.start_time }}</td>
       {% if show_producers %}
-        <td style="{{ styles['td'] }}">{{ r.parameters.producer|producerAsHTML }}</td>
+        <td style="{{ styles['td'] }}">
+          {{ r.parameters.producer|producerAsHTML|safe if 'producer' in r.parameters else "" }}
+        </td>
       {% endif %}
     </tr>
     {% else %}
@@ -113,6 +107,7 @@
   {% endfor %}
  </tbody>
 </table>
+</p>
 
 {% if compare_to and run.machine != compare_to.machine %}
 <p><b>
@@ -125,7 +120,7 @@
 </b></p>
 {% endif %}
 
-<hr>
+<hr/>
 <h3>Tests Summary</h3>
 <table style="{{ styles['table'] }}" class="{{ classes['table'] }}">
   <thead>
@@ -173,7 +168,7 @@
                                                    'Previous', '', ' (B)', run_to_baseline_info, styles, classes)
   }}
 {% endfor %}
-<p>
+</p>
 {% if baseline %}
 <h3>Run-Over-Baseline Changes Detail</h3>
 {% for _, field, bucket_name, sorted_bucket, test_names, show_perf in prioritized_buckets_run_over_baseline %}
@@ -189,7 +184,3 @@
 {% endif %}
 <hr/>
 <b>Report Time</b>: {{ start_time | timedelta }}
-{% if not only_html_body %}
-</body>
-</html>
-{% endif %}

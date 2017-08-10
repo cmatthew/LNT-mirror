@@ -14,9 +14,9 @@ Contents
 
    tests
 
-   changes
-
    concepts
+
+   api
 
    importing_data
 
@@ -24,8 +24,6 @@ Contents
 
    profiles
    
-   todo
-
 Indices and tables
 ==================
 

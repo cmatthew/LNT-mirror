@@ -3,10 +3,12 @@ from flask import abort
 from flask import current_app, g, render_template
 from flask import request
 
-frontend = flask.Module(__name__)
+frontend = flask.Blueprint("lnt", __name__, template_folder="ui/templates/",
+                           static_folder="ui/static")
+
 
 # Decorator for implementing per-database routes.
-def db_route(rule, only_v3 = True, **options):
+def db_route(rule, only_v3=True, **options):
     """
     LNT specific route for endpoints which always refer to some database
     object.
@@ -15,7 +17,7 @@ def db_route(rule, only_v3 = True, **options):
     database, as well as initializing the global database information objects.
     """
     def decorator(f):
-        def wrap(db_name = None, **args):
+        def wrap(db_name=None, **args):
             # Initialize the database parameters on the app globals object.
             g.db_name = db_name or "default"
             g.db_info = current_app.old_config.databases.get(g.db_name)
@@ -31,7 +33,8 @@ UI support for database with version %r is not yet implemented.""" % (
             # Compute result.
             result = f(**args)
 
-            # Make sure that any transactions begun by this request are finished.
+            # Make sure that any transactions begun by this request are
+            # finished.
             request.get_db().rollback()
 
             # Return result.
@@ -44,6 +47,7 @@ UI support for database with version %r is not yet implemented.""" % (
         return wrap
     return decorator
 
+
 # Decorator for implementing per-testsuite routes.
 def v4_route(rule, **options):
     """
@@ -53,7 +57,7 @@ def v4_route(rule, **options):
 
     # FIXME: This is manually composed with db_route.
     def decorator(f):
-        def wrap(testsuite_name, db_name = None, **args):
+        def wrap(testsuite_name, db_name=None, **args):
             # Initialize the test suite parameters on the app globals object.
             g.testsuite_name = testsuite_name
 
@@ -66,7 +70,8 @@ def v4_route(rule, **options):
             # Compute result.
             result = f(**args)
 
-            # Make sure that any transactions begun by this request are finished.
+            # Make sure that any transactions begun by this request are
+            # finished.
             request.get_db().rollback()
 
             # Return result.

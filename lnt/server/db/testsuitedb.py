@@ -9,21 +9,58 @@ import datetime
 import json
 import os
 
+import aniso8601
 import sqlalchemy
 from flask import session
 from sqlalchemy import *
+from sqlalchemy.orm import relation
+from sqlalchemy.orm.exc import ObjectDeletedError
+from typing import List
 
 import testsuite
 import lnt.testing.profile.profile as profile
-from lnt.testing.util.commands import warning, note
 import lnt
 
 
-def strip(obj):
-    """Give back a dict without sqlalchemy stuff."""
-    new_dict = dict(obj)
-    new_dict.pop('_sa_instance_state', None)
-    return new_dict
+def _dict_update_abort_on_duplicates(base_dict, to_merge):
+    '''This behaves like base_dict.update(to_merge) but asserts that none
+    of the keys in to_merge is present in base_dict yet.'''
+    for key, value in to_merge.items():
+        assert base_dict.get(key, None) is None
+        base_dict[key] = value
+
+
+_sample_type_to_sql = {
+    'Real': Float,
+    'Hash': String,
+    'Status': Integer,
+}
+
+
+def is_known_sample_type(name):
+    return name in _sample_type_to_sql
+
+
+def make_sample_column(name, type):
+    sqltype = _sample_type_to_sql.get(type)
+    if sqltype is None:
+        raise ValueError("test suite defines unknown sample type %r" % type)
+    options = []
+    if type == 'Status':
+        options.append(ForeignKey(testsuite.StatusKind.id))
+    return Column(name, sqltype, *options)
+
+
+def make_run_column(name):
+    return Column(name, String(256))
+
+
+def make_machine_column(name):
+    return Column(name, String(256))
+
+
+class MachineInfoChanged(ValueError):
+    pass
 
 
 class TestSuiteDB(object):
@@ -37,7 +74,7 @@ class TestSuiteDB(object):
     through the model classes constructed by this wrapper object.
     """
 
-    def __init__(self, v4db, name, test_suite):
+    def __init__(self, v4db, name, test_suite, create_tables=False):
         testsuitedb = self
         self.v4db = v4db
         self.name = name
@@ -48,7 +85,7 @@ class TestSuiteDB(object):
         self.order_fields = list(self.test_suite.order_fields)
         self.run_fields = list(self.test_suite.run_fields)
         self.sample_fields = list(self.test_suite.sample_fields)
-        for i,field in enumerate(self.sample_fields):
+        for i, field in enumerate(self.sample_fields):
             field.index = i
 
         self.base = sqlalchemy.ext.declarative.declarative_base()
@@ -69,6 +106,15 @@ class TestSuiteDB(object):
             def set_field(self, field, value):
                 return setattr(self, field.name, value)
 
+            def get_fields(self):
+                result = dict()
+                for field in self.fields:
+                    value = self.get_field(field)
+                    if value is None:
+                        continue
+                    result[field.name] = value
+                return result
+
         db_key_name = self.test_suite.db_key_name
 
         class Machine(self.base, ParameterizedMixin):
@@ -81,20 +127,20 @@ class TestSuiteDB(object):
             name = Column("Name", String(256), index=True)
 
             # The parameters blob is used to store any additional information
-            # reported by the run but not promoted into the machine record. Such
-            # data is stored as a JSON encoded blob.
-            parameters_data = Column("Parameters", Binary, index=False, unique=False)
+            # reported by the run but not promoted into the machine record.
+            # Such data is stored as a JSON encoded blob.
+            parameters_data = Column("Parameters", Binary)
 
             # Dynamically create fields for all of the test suite defined
             # machine fields.
             class_dict = locals()
             for item in fields:
-                if item.name in class_dict:
+                iname = item.name
+                if iname in class_dict:
                     raise ValueError("test suite defines reserved key %r" % (
-                        name))
+                        iname))
 
-                class_dict[item.name] = item.column = Column(
-                    item.name, String(256))
+                class_dict[iname] = item.column = make_machine_column(iname)
 
             def __init__(self, name_value):
                 self.name = name_value
@@ -111,7 +157,7 @@ class TestSuiteDB(object):
             @parameters.setter
             def parameters(self, data):
                 self.parameters_data = json.dumps(sorted(data.items()))
-            
+
             def get_baseline_run(self):
                 ts = Machine.testsuite
                 user_baseline = ts.get_users_baseline()
@@ -131,7 +177,7 @@ class TestSuiteDB(object):
                 Find the closest previous run to the requested order, for which
                 this machine also reported.
                 """
-                
+
                 # FIXME: Scalability! Pretty fast in practice, but still.
                 ts = Machine.testsuite
                 # Search for best order.
@@ -142,7 +188,7 @@ class TestSuiteDB(object):
                     if order >= order_to_find and \
                           (best_order is None or order < best_order):
                         best_order = order
-                
+
                 # Find the most recent run on this machine that used
                 # that order.
                 closest_run = None
@@ -151,11 +197,16 @@ class TestSuiteDB(object):
                         .filter(ts.Run.machine_id == self.id)\
                         .filter(ts.Run.order_id == best_order.id)\
                         .order_by(ts.Run.start_time.desc()).first()
-                
+
                 return closest_run
-            
+
             def __json__(self):
-                return strip(self.__dict__) # {u'name': self.name, u'MachineID': self.id}
+                result = dict()
+                result['name'] = self.name
+                result['id'] = self.id
+                _dict_update_abort_on_duplicates(result, self.get_fields())
+                _dict_update_abort_on_duplicates(result, self.parameters)
+                return result
 
         class Order(self.base, ParameterizedMixin):
             __tablename__ = db_key_name + '_Order'
@@ -164,25 +215,23 @@ class TestSuiteDB(object):
             # supposed to be lexicographically compared, the __cmp__ method
             # relies on this.
             fields = sorted(self.order_fields,
-                            key = lambda of: of.ordinal)
+                            key=lambda of: of.ordinal)
 
             id = Column("ID", Integer, primary_key=True)
 
-            # Define two common columns which are used to store the previous and
-            # next links for the total ordering amongst run orders.
-            next_order_id = Column("NextOrder", Integer, ForeignKey(
-                    "%s.ID" % __tablename__))
-            previous_order_id = Column("PreviousOrder", Integer, ForeignKey(
-                    "%s.ID" % __tablename__))
+            # Define two common columns which are used to store the previous
+            # and next links for the total ordering amongst run orders.
+            next_order_id = Column("NextOrder", Integer, ForeignKey(id))
+            previous_order_id = Column("PreviousOrder", Integer,
+                                       ForeignKey(id))
 
             # This will implicitly create the previous_order relation.
-            next_order = sqlalchemy.orm.relation("Order",
-                                                 backref=sqlalchemy.orm.backref('previous_order',
-                                                                                uselist=False,
-                                                                                remote_side=id),
-                                                 primaryjoin='Order.previous_order_id==Order.id',
-                                                 uselist=False)
-            
+            backref = sqlalchemy.orm.backref('previous_order', uselist=False,
+                                             remote_side=id)
+            join = 'Order.previous_order_id==Order.id'
+            next_order = relation("Order", backref=backref, primaryjoin=join,
+                                  uselist=False)
+
             # Dynamically create fields for all of the test suite defined order
             # fields.
             class_dict = locals()
@@ -194,7 +243,7 @@ class TestSuiteDB(object):
                 class_dict[item.name] = item.column = Column(
                     item.name, String(256))
 
-            def __init__(self, previous_order_id = None, next_order_id = None,
+            def __init__(self, previous_order_id=None, next_order_id=None,
                          **kwargs):
                 self.previous_order_id = previous_order_id
                 self.next_order_id = next_order_id
@@ -229,7 +278,7 @@ class TestSuiteDB(object):
                 return self.as_ordered_string()
 
             def __cmp__(self, b):
-                # SA occassionally uses comparison to check model instances
+                # SA occasionally uses comparison to check model instances
                 # verse some sentinels, so we ensure we support comparison
                 # against non-instances.
                 if self.__class__ is not b.__class__:
@@ -240,7 +289,7 @@ class TestSuiteDB(object):
                 # separated component to an integer if is is numeric.
                 def convert_field(value):
                     items = value.strip().split('.')
-                    for i,item in enumerate(items):
+                    for i, item in enumerate(items):
                         if item.isdigit():
                             items[i] = int(item, 10)
                     return tuple(items)
@@ -250,15 +299,14 @@ class TestSuiteDB(object):
                                  for item in self.fields),
                            tuple(convert_field(b.get_field(item))
                                  for item in self.fields))
-                                 
-            def __json__(self):
-                order = dict((item.name, self.get_field(item))
-                              for item in self.fields)
-                order[u'id'] = self.id
-                order[u'name'] = self.as_ordered_string()
-                return strip(order)
-                
-                
+
+            def __json__(self, include_id=True):
+                result = {}
+                if include_id:
+                    result['id'] = self.id
+                _dict_update_abort_on_duplicates(result, self.get_fields())
+                return result
+
         class Run(self.base, ParameterizedMixin):
             __tablename__ = db_key_name + '_Run'
 
@@ -274,12 +322,12 @@ class TestSuiteDB(object):
             simple_run_id = Column("SimpleRunID", Integer)
 
             # The parameters blob is used to store any additional information
-            # reported by the run but not promoted into the machine record. Such
-            # data is stored as a JSON encoded blob.
-            parameters_data = Column("Parameters", Binary, index=False, unique=False)
+            # reported by the run but not promoted into the machine record.
+            # Such data is stored as a JSON encoded blob.
+            parameters_data = Column("Parameters", Binary)
 
-            machine = sqlalchemy.orm.relation(Machine)
-            order = sqlalchemy.orm.relation(Order)
+            machine = relation(Machine)
+            order = relation(Order)
 
             # Dynamically create fields for all of the test suite defined run
             # fields.
@@ -288,12 +336,12 @@ class TestSuiteDB(object):
             # but need a bit for that in the test suite definition.
             class_dict = locals()
             for item in fields:
-                if item.name in class_dict:
-                    raise ValueError,"test suite defines reserved key %r" % (
-                        name,)
+                iname = item.name
+                if iname in class_dict:
+                    raise ValueError("test suite defines reserved key %r" %
+                                     (iname,))
 
-                class_dict[item.name] = item.column = Column(
-                    item.name, String(256))
+                class_dict[iname] = item.column = make_run_column(iname)
 
             def __init__(self, machine, order, start_time, end_time):
                 self.machine = machine
@@ -315,12 +363,31 @@ class TestSuiteDB(object):
             @parameters.setter
             def parameters(self, data):
                 self.parameters_data = json.dumps(sorted(data.items()))
-                
-            def __json__(self):
-                self.machine
-                self.order
-                return strip(self.__dict__)
-                         
+
+            def __json__(self, flatten_order=True):
+                result = {
+                    'id': self.id,
+                    'start_time': self.start_time,
+                    'end_time': self.end_time,
+                }
+                # Leave out: machine_id, simple_run_id, imported_from
+                if flatten_order:
+                    _dict_update_abort_on_duplicates(
+                        result, self.order.__json__(include_id=False))
+                    result['order_by'] = \
+                        ','.join([f.name for f in self.order.fields])
+                    result['order_id'] = self.order_id
+                else:
+                    result['order_id'] = self.order_id
+                _dict_update_abort_on_duplicates(result, self.get_fields())
+                _dict_update_abort_on_duplicates(result, self.parameters)
+                return result
+
+        Machine.runs = relation(Run, back_populates='machine',
+                                cascade="all, delete-orphan")
+        Order.runs = relation(Run, back_populates='order',
+                              cascade="all, delete-orphan")
+
         class Test(self.base, ParameterizedMixin):
             __tablename__ = db_key_name + '_Test'
 
@@ -333,9 +400,12 @@ class TestSuiteDB(object):
             def __repr__(self):
                 return '%s_%s%r' % (db_key_name, self.__class__.__name__,
                                     (self.name,))
-                                    
-            def __json__(self):
-                return strip(self.__dict__)
+
+            def __json__(self, include_id=True):
+                result = {'name': self.name}
+                if include_id:
+                    result['id'] = self.id
+                return result
 
         class Profile(self.base):
             __tablename__ = db_key_name + '_Profile'
@@ -351,13 +421,16 @@ class TestSuiteDB(object):
                 self.accessed_time = datetime.datetime.now()
 
                 if config is not None:
-                    self.filename = profile.Profile.saveFromRendered(encoded,
-                                                             profileDir=config.config.profileDir,
-                                                             prefix='t-%s-s-' % os.path.basename(testid))
+                    profileDir = config.config.profileDir
+                    prefix = 't-%s-s-' % os.path.basename(testid)
+                    self.filename = \
+                        profile.Profile.saveFromRendered(encoded,
+                                                         profileDir=profileDir,
+                                                         prefix=prefix)
 
                 p = profile.Profile.fromRendered(encoded)
-                s = ','.join('%s=%s' % (k,v)
-                             for k,v in p.getTopLevelCounters().items())
+                s = ','.join('%s=%s' % (k, v)
+                             for k, v in p.getTopLevelCounters().items())
                 self.counters = s[:512]
 
             def getTopLevelCounters(self):
@@ -368,22 +441,24 @@ class TestSuiteDB(object):
                 return d
 
             def load(self, profileDir):
-                return profile.Profile.fromFile(os.path.join(profileDir, self.filename))
-            
+                return profile.Profile.fromFile(os.path.join(profileDir,
+                                                             self.filename))
+
         class Sample(self.base, ParameterizedMixin):
             __tablename__ = db_key_name + '_Sample'
 
             fields = self.sample_fields
             id = Column("ID", Integer, primary_key=True)
-            # We do not need an index on run_id, this is covered by the compound
-            # (Run(ID),Test(ID)) index we create below.
-            run_id = Column("RunID", Integer, ForeignKey(Run.id))
-            test_id = Column("TestID", Integer, ForeignKey(Test.id), index=True)
+            # We do not need an index on run_id, this is covered by the
+            # compound (Run(ID),Test(ID)) index we create below.
+            run_id = Column("RunID", Integer, ForeignKey(Run.id), index=True)
+            test_id = Column("TestID", Integer, ForeignKey(Test.id),
+                             index=True)
             profile_id = Column("ProfileID", Integer, ForeignKey(Profile.id))
-            
-            run = sqlalchemy.orm.relation(Run)
-            test = sqlalchemy.orm.relation(Test)
-            profile = sqlalchemy.orm.relation(Profile)
+
+            run = relation(Run)
+            test = relation(Test)
+            profile = relation(Profile)
 
             @staticmethod
             def get_primary_fields():
@@ -410,7 +485,7 @@ class TestSuiteDB(object):
                 worse than other potential values for this field.
                 """
                 for field in self.Sample.fields:
-                    if field.type.name == 'Real':
+                    if field.type.name in ['Real', 'Integer']:
                         yield field
 
             @staticmethod
@@ -439,23 +514,13 @@ class TestSuiteDB(object):
             # the new UI is up.
             class_dict = locals()
             for item in self.sample_fields:
-                if item.name in class_dict:
-                    raise ValueError,"test suite defines reserved key %r" % (
-                        name,)
+                iname = item.name
+                if iname in class_dict:
+                    raise ValueError("test suite defines reserved key %r" %
+                                     (iname,))
 
-                if item.type.name == 'Real':
-                    item.column = Column(item.name, Float)
-                elif item.type.name == 'Status':
-                    item.column = Column(item.name, Integer, ForeignKey(
-                            testsuite.StatusKind.id))
-                elif item.type.name == 'Hash':
-                    item.column = Column(item.name, String)
-                else:
-                    raise ValueError,(
-                        "test suite defines unknown sample type %r" (
-                            item.type.name,))
-
-                class_dict[item.name] = item.column
+                item.column = make_sample_column(iname, item.type.name)
+                class_dict[iname] = item.column
 
             def __init__(self, run, test, **kwargs):
                 self.run = run
@@ -467,47 +532,58 @@ class TestSuiteDB(object):
 
             def __repr__(self):
                 fields = dict((item.name, self.get_field(item))
-                             for item in self.fields)
+                              for item in self.fields)
 
                 return '%s_%s(%r, %r, **%r)' % (
                     db_key_name, self.__class__.__name__,
                     self.run, self.test, fields)
-        
+
+            def __json__(self, flatten_test=False, include_id=True):
+                result = {}
+                if include_id:
+                    result['id'] = self.id
+                # Leave out: run_id
+                # TODO: What about profile/profile_id?
+                if flatten_test:
+                    _dict_update_abort_on_duplicates(
+                        result, self.test.__json__(include_id=False))
+                else:
+                    result['test_id'] = self.test_id
+                _dict_update_abort_on_duplicates(result, self.get_fields())
+                return result
+
+        Run.samples = relation(Sample, back_populates='run',
+                               cascade="all, delete-orphan")
+
         class FieldChange(self.base, ParameterizedMixin):
             """FieldChange represents a change in between the values
-            of the same field belonging to two samples from consecutive runs."""
-            
+            of the same field belonging to two samples from consecutive runs.
+            """
+
             __tablename__ = db_key_name + '_FieldChangeV2'
-            id = Column("ID", Integer, primary_key = True)
+            id = Column("ID", Integer, primary_key=True)
             old_value = Column("OldValue", Float)
             new_value = Column("NewValue", Float)
             start_order_id = Column("StartOrderID", Integer,
-                                    ForeignKey("%s_Order.ID" % db_key_name))
-            end_order_id = Column("EndOrderID", Integer,
-                                  ForeignKey("%s_Order.ID" % db_key_name))
-            test_id = Column("TestID", Integer,
-                             ForeignKey("%s_Test.ID" % db_key_name))
-            machine_id = Column("MachineID", Integer,
-                                ForeignKey("%s_Machine.ID" % db_key_name))
+                                    ForeignKey(Order.id))
+            end_order_id = Column("EndOrderID", Integer, ForeignKey(Order.id))
+            test_id = Column("TestID", Integer, ForeignKey(Test.id))
+            machine_id = Column("MachineID", Integer, ForeignKey(Machine.id))
             field_id = Column("FieldID", Integer,
                               ForeignKey(self.v4db.SampleField.id))
             # Could be from many runs, but most recent one is interesting.
-            run_id = Column("RunID", Integer,
-                                ForeignKey("%s_Run.ID" % db_key_name))
-            
-            start_order = sqlalchemy.orm.relation(Order,
-                                                  primaryjoin='FieldChange.'\
-                                                  'start_order_id==Order.id')
-            end_order = sqlalchemy.orm.relation(Order,
-                                                primaryjoin='FieldChange.'\
-                                                'end_order_id==Order.id')
-            test = sqlalchemy.orm.relation(Test)
-            machine = sqlalchemy.orm.relation(Machine)
-            field = sqlalchemy.orm.relation(self.v4db.SampleField,
-                                            primaryjoin= \
-                                              self.v4db.SampleField.id == \
-                                              field_id)
-            run = sqlalchemy.orm.relation(Run)
+            run_id = Column("RunID", Integer, ForeignKey(Run.id))
+
+            start_order = relation(Order, primaryjoin='FieldChange.'
+                                   'start_order_id==Order.id')
+            end_order = relation(Order, primaryjoin='FieldChange.'
+                                 'end_order_id==Order.id')
+            test = relation(Test)
+            machine = relation(Machine)
+            field = relation(self.v4db.SampleField,
+                             primaryjoin=(self.v4db.SampleField.id ==
+                                          field_id))
+            run = relation(Run)
 
             def __init__(self, start_order, end_order, machine,
                          test, field):
@@ -521,19 +597,27 @@ class TestSuiteDB(object):
                 return '%s_%s%r' % (db_key_name, self.__class__.__name__,
                                     (self.start_order, self.end_order,
                                      self.test, self.machine, self.field))
-            
+
             def __json__(self):
-                self.machine
-                self.test
-                self.field
-                self.run
-                self.start_order
-                self.end_order
-                return strip(self.__dict__) 
-                        
+                return {
+                    'id': self.id,
+                    'old_value': self.old_value,
+                    'new_value': self.new_value,
+                    'start_order_id': self.start_order_id,
+                    'end_order_id': self.end_order_id,
+                    'test_id': self.test_id,
+                    'machine_id': self.machine_id,
+                    'field_id': self.field_id,
+                    'run_id': self.run_id,
+                }
+
+        Machine.fieldchanges = relation(FieldChange, back_populates='machine',
+                                        cascade="all, delete-orphan")
+        Run.fieldchanges = relation(FieldChange, back_populates='run',
+                                    cascade="all, delete-orphan")
 
         class Regression(self.base, ParameterizedMixin):
-            """Regession hold data about a set of RegressionIndicies."""
+            """Regressions hold data about a set of RegressionIndices."""
 
             __tablename__ = db_key_name + '_Regression'
             id = Column("ID", Integer, primary_key=True)
@@ -547,11 +631,26 @@ class TestSuiteDB(object):
                 self.state = state
 
             def __repr__(self):
-                return '%s_%s:"%s"' % (db_key_name, self.__class__.__name__,
-                                    self.title)
-            
+                """String representation of the Regression for debugging.
+
+                Sometimes we try to print deleted regressions: in this case
+                don't die, and return a deleted """
+                try:
+                    return '{}_{}:"{}"'.format(db_key_name,
+                                               self.__class__.__name__,
+                                               self.title)
+                except ObjectDeletedError:
+                    return '{}_{}:"{}"'.format(db_key_name,
+                                               self.__class__.__name__,
+                                               "<Deleted>")
+
             def __json__(self):
-                 return strip(self.__dict__)
+                return {
+                    'id': self.id,
+                    'title': self.title,
+                    'bug': self.bug,
+                    'state': self.state,
+                }
 
         class RegressionIndicator(self.base, ParameterizedMixin):
             """"""
@@ -559,26 +658,32 @@ class TestSuiteDB(object):
             __tablename__ = db_key_name + '_RegressionIndicator'
             id = Column("ID", Integer, primary_key=True)
             regression_id = Column("RegressionID", Integer,
-                                   ForeignKey("%s_Regression.ID" % db_key_name))
-
+                                   ForeignKey(Regression.id))
             field_change_id = Column("FieldChangeID", Integer,
-                            ForeignKey("%s_FieldChangeV2.ID" % db_key_name))
+                                     ForeignKey(FieldChange.id))
 
-            regression = sqlalchemy.orm.relation(Regression)
-            field_change = sqlalchemy.orm.relation(FieldChange)
+            regression = relation(Regression)
+            field_change = relation(FieldChange)
 
             def __init__(self, regression, field_change):
                 self.regression = regression
                 self.field_change = field_change
 
             def __repr__(self):
-                return '%s_%s%r' % (db_key_name, self.__class__.__name__,(
-                        self.id, self.regression, self.field_change))
-            
+                return '%s_%s%r' % (db_key_name, self.__class__.__name__,
+                                    (self.id, self.regression,
+                                     self.field_change))
+
             def __json__(self):
-                return {u'RegressionIndicatorID': self.id,
-                        u'Regression': self.regression,
-                        u'FieldChange': self.field_change}
+                return {
+                    'RegressionIndicatorID': self.id,
+                    'Regression': self.regression,
+                    'FieldChange': self.field_change
+                }
+
+        FieldChange.regression_indicators = \
+            relation(RegressionIndicator, back_populates='field_change',
+                     cascade="all, delete-orphan")
 
         class ChangeIgnore(self.base, ParameterizedMixin):
             """Changes to ignore in the web interface."""
@@ -587,16 +692,16 @@ class TestSuiteDB(object):
             id = Column("ID", Integer, primary_key=True)
 
             field_change_id = Column("ChangeIgnoreID", Integer,
-                                     ForeignKey("%s_FieldChangeV2.ID" % db_key_name))
+                                     ForeignKey(FieldChange.id))
 
-            field_change = sqlalchemy.orm.relation(FieldChange)
+            field_change = relation(FieldChange)
 
             def __init__(self, field_change):
                 self.field_change = field_change
 
             def __repr__(self):
-                return '%s_%s%r' % (db_key_name, self.__class__.__name__,(
-                                    self.id, self.field_change))
+                return '%s_%s%r' % (db_key_name, self.__class__.__name__,
+                                    (self.id, self.field_change))
 
         class Baseline(self.base, ParameterizedMixin):
             """Baselines to compare runs to."""
@@ -605,10 +710,9 @@ class TestSuiteDB(object):
             id = Column("ID", Integer, primary_key=True)
             name = Column("Name", String(32), unique=True)
             comment = Column("Comment", String(256))
-            order_id = Column("OrderID", Integer,
-                              ForeignKey("%s_Order.ID" % db_key_name),
+            order_id = Column("OrderID", Integer, ForeignKey(Order.id),
                               index=True)
-            order = sqlalchemy.orm.relation(Order)
+            order = relation(Order)
 
             def __str__(self):
                 return "Baseline({})".format(self.name)
@@ -629,13 +733,6 @@ class TestSuiteDB(object):
         sqlalchemy.schema.Index("ix_%s_Sample_RunID_TestID" % db_key_name,
                                 Sample.run_id, Sample.test_id)
 
-        # Create the index we use to ensure machine uniqueness.
-        args = [Machine.name, Machine.parameters_data]
-        for item in self.machine_fields:
-            args.append(item.column)
-        sqlalchemy.schema.Index("ix_%s_Machine_Unique" % db_key_name,
-                                *args, unique = True)
-
         # Add several shortcut aliases, similar to the ones on the v4db.
         self.session = self.v4db.session
         self.add = self.v4db.add
@@ -644,12 +741,16 @@ class TestSuiteDB(object):
         self.query = self.v4db.query
         self.rollback = self.v4db.rollback
 
+        if create_tables:
+            self.base.metadata.create_all(v4db.engine)
+
     def get_baselines(self):
         return self.query(self.Baseline).all()
 
     def get_users_baseline(self):
         try:
-            session_baseline = session.get(lnt.server.ui.util.baseline_key(self.name))
+            baseline_key = lnt.server.ui.util.baseline_key(self.name)
+            session_baseline = session.get(baseline_key)
         except RuntimeError:
             # Sometimes this is called from outside the app context.
             # In that case, don't get the user's session baseline.
@@ -659,68 +760,81 @@ class TestSuiteDB(object):
 
         return None
 
-    def _getOrCreateMachine(self, machine_data):
+    def _getOrCreateMachine(self, machine_data, forceUpdate):
         """
-        _getOrCreateMachine(data) -> Machine, bool
+        _getOrCreateMachine(data, forceUpdate) -> Machine
 
         Add or create (and insert) a Machine record from the given machine data
         (as recorded by the test interchange format).
-
-        The boolean result indicates whether the returned record was constructed
-        or not.
         """
 
-        # Convert the machine data into a machine record. We construct the query
-        # to look for any existing machine at the same time as we build up the
-        # record to possibly add.
-        #
-        # FIXME: This feels inelegant, can't SA help us out here?
-        query = self.query(self.Machine).\
-            filter(self.Machine.name == machine_data['Name'])
-        machine = self.Machine(machine_data['Name'])
-        machine_parameters = machine_data['Info'].copy()
-
-        # First, extract all of the specified machine fields.
+        # Convert the machine data into a machine record.
+        machine_parameters = machine_data.copy()
+        name = machine_parameters.pop('name')
+        machine = self.Machine(name)
+        machine_parameters.pop('id', None)
         for item in self.machine_fields:
-            if item.info_key in machine_parameters:
-                value = machine_parameters.pop(item.info_key)
-            else:
-                # For now, insert empty values for any missing fields. We don't
-                # want to insert NULLs, so we should probably allow the test
-                # suite to define defaults.
-                value = ''
-
-            query = query.filter(item.column == value)
+            value = machine_parameters.pop(item.name, None)
             machine.set_field(item, value)
-
-        # Convert any remaining machine_parameters into a JSON encoded blob. We
-        # encode this as an array to avoid a potential ambiguity on the key
-        # ordering.
         machine.parameters = machine_parameters
-        query = query.filter(self.Machine.parameters_data ==
-                             machine.parameters_data)
 
-        # Execute the query to see if we already have this machine.
-        try:
-            return query.one(),False
-        except sqlalchemy.orm.exc.NoResultFound:
-            # If not, add the machine.
+        # Look for an existing machine.
+        existing_machines = self.query(self.Machine) \
+            .filter(self.Machine.name == name) \
+            .order_by(self.Machine.id.desc()) \
+            .all()
+        if len(existing_machines) == 0:
             self.add(machine)
+            return machine
 
-            return machine,True
+        existing = existing_machines[0]
+
+        # Unfortunately previous LNT versions allowed multiple machines
+        # with the same name to exist, so we should choose the one that
+        # matches best.
+        if len(existing_machines) > 1:
+            for m in existing_machines:
+                if m.parameters == machine.parameters:
+                    existing = m
+                    break
+
+        # Check and potentially update existing machine.
+        # Parameters that were previously unset are added. If a parameter
+        # changed then we update or abort depending on `forceUpdate`.
+        for field in self.machine_fields:
+            existing_value = existing.get_field(field)
+            new_value = machine.get_field(field)
+            if existing_value is None:
+                existing.set_field(field, new_value)
+            elif existing_value != new_value:
+                if not forceUpdate:
+                    raise MachineInfoChanged("'%s' on machine '%s' changed." %
+                                             (field.name, name))
+                else:
+                    existing.set_field(field, new_value)
+        existing_parameters = existing.parameters
+        for key, value in machine.parameters.items():
+            existing_value = existing_parameters.get(key, None)
+            if existing_value is None:
+                existing_parameters[key] = value
+            elif existing_value != value:
+                if not forceUpdate:
+                    raise MachineInfoChanged("'%s' on machine '%s' changed." %
+                                             (key, name))
+                else:
+                    existing_parameters[key] = value
+        existing.parameters = existing_parameters
+        return existing
 
     def _getOrCreateOrder(self, run_parameters):
         """
-        _getOrCreateOrder(data) -> Order, bool
+        _getOrCreateOrder(data) -> Order
 
         Add or create (and insert) an Order record based on the given run
         parameters (as recorded by the test interchange format).
 
         The run parameters that define the order will be removed from the
         provided ddata argument.
-
-        The boolean result indicates whether the returned record was constructed
-        or not.
         """
 
         query = self.query(self.Order)
@@ -728,119 +842,124 @@ class TestSuiteDB(object):
 
         # First, extract all of the specified order fields.
         for item in self.order_fields:
-            if item.info_key in run_parameters:
-                value = run_parameters.pop(item.info_key)
-            else:
+            value = run_parameters.pop(item.name, None)
+            if value is None:
                 # We require that all of the order fields be present.
-                raise ValueError,"""\
-supplied run is missing required run parameter: %r""" % (
-                    item.info_key)
+                raise ValueError("Supplied run is missing parameter: %r" %
+                                 (item.name))
 
             query = query.filter(item.column == value)
             order.set_field(item, value)
 
         # Execute the query to see if we already have this order.
-        try:
-            return query.one(),False
-        except sqlalchemy.orm.exc.NoResultFound:
-            # If not, then we need to insert this order into the total ordering
-            # linked list.
+        existing = query.first()
+        if existing is not None:
+            return existing
 
-            # Add the new order and commit, to assign an ID.
-            self.add(order)
-            self.v4db.session.commit()
+        # If not, then we need to insert this order into the total ordering
+        # linked list.
 
-            # Load all the orders.
-            orders = list(self.query(self.Order))
+        # Add the new order and commit, to assign an ID.
+        self.add(order)
+        self.v4db.session.commit()
 
-            # Sort the objects to form the total ordering.
-            orders.sort()
+        # Load all the orders.
+        orders = list(self.query(self.Order))
 
-            # Find the order we just added.
-            index = orders.index(order)
+        # Sort the objects to form the total ordering.
+        orders.sort()
 
-            # Insert this order into the linked list which forms the total
-            # ordering.
-            if index > 0:
-                previous_order = orders[index - 1]
-                previous_order.next_order_id = order.id
-                order.previous_order_id = previous_order.id
-            if index + 1 < len(orders):
-                next_order = orders[index + 1]
-                next_order.previous_order_id = order.id
-                order.next_order_id = next_order.id
+        # Find the order we just added.
+        index = orders.index(order)
 
-            return order,True
+        # Insert this order into the linked list which forms the total
+        # ordering.
+        if index > 0:
+            previous_order = orders[index - 1]
+            previous_order.next_order_id = order.id
+            order.previous_order_id = previous_order.id
+        if index + 1 < len(orders):
+            next_order = orders[index + 1]
+            next_order.previous_order_id = order.id
+            order.next_order_id = next_order.id
 
-    def _getOrCreateRun(self, run_data, machine):
+        return order
+
+    def _getOrCreateRun(self, run_data, machine, merge):
         """
-        _getOrCreateRun(data) -> Run, bool
+        _getOrCreateRun(run_data, machine, merge) -> Run, bool
 
         Add a new Run record from the given data (as recorded by the test
         interchange format).
 
-        The boolean result indicates whether the returned record was constructed
-        or not.
+        merge comes into play when there is already a run with the same order
+        fields:
+        - 'reject': Reject submission (raise ValueError).
+        - 'replace': Remove the existing submission(s), then add the new one.
+        - 'append': Add new submission.
+
+        The boolean result indicates whether the returned record was
+        constructed or not.
         """
 
         # Extra the run parameters that define the order.
-        run_parameters = run_data['Info'].copy()
+        run_parameters = run_data.copy()
+        # Ignore incoming ids; we will create our own
+        run_parameters.pop('id', None)
 
-        # The tag has already been used to dispatch to the appropriate database.
-        run_parameters.pop('tag')
+        # Added by REST API, we will replace as well.
+        run_parameters.pop('order_by', None)
+        run_parameters.pop('order_id', None)
+        run_parameters.pop('machine_id', None)
+        run_parameters.pop('imported_from', None)
+        run_parameters.pop('simple_run_id', None)
 
         # Find the order record.
-        order,inserted = self._getOrCreateOrder(run_parameters)
-        start_time = datetime.datetime.strptime(run_data['Start Time'],
-                                                "%Y-%m-%d %H:%M:%S")
-        end_time = datetime.datetime.strptime(run_data['End Time'],
-                                              "%Y-%m-%d %H:%M:%S")
+        order = self._getOrCreateOrder(run_parameters)
 
-        # Convert the rundata into a run record. As with Machines, we construct
-        # the query to look for any existingrun at the same time as we build up
-        # the record to possibly add.
-        #
-        # FIXME: This feels inelegant, can't SA help us out here?
-        query = self.query(self.Run).\
-            filter(self.Run.machine_id == machine.id).\
-            filter(self.Run.order_id == order.id).\
-            filter(self.Run.start_time == start_time).\
-            filter(self.Run.end_time == end_time)
+        if merge != 'append':
+            existing_runs = self.query(self.Run) \
+                .filter(self.Run.machine_id == machine.id) \
+                .filter(self.Run.order_id == order.id) \
+                .all()
+            if len(existing_runs) > 0:
+                if merge == 'reject':
+                    raise ValueError("Duplicate submission for '%s'" %
+                                     order.name)
+                elif merge == 'replace':
+                    for run in existing_runs:
+                        self.delete(run)
+                else:
+                    raise ValueError('Invalid Run mergeStrategy %r' % merge)
+
+        # We'd like ISO8061 timestamps, but will also accept the old format.
+        try:
+            start_time = aniso8601.parse_datetime(run_data['start_time'])
+        except ValueError:
+            start_time = datetime.datetime.strptime(run_data['start_time'],
+                                                    "%Y-%m-%d %H:%M:%S")
+        run_parameters.pop('start_time')
+
+        try:
+            end_time = aniso8601.parse_datetime(run_data['end_time'])
+        except ValueError:
+            end_time = datetime.datetime.strptime(run_data['end_time'],
+                                                  "%Y-%m-%d %H:%M:%S")
+        run_parameters.pop('end_time')
+
         run = self.Run(machine, order, start_time, end_time)
 
         # First, extract all of the specified run fields.
         for item in self.run_fields:
-            if item.info_key in run_parameters:
-                value = run_parameters.pop(item.info_key)
-            else:
-                # For now, insert empty values for any missing fields. We don't
-                # want to insert NULLs, so we should probably allow the test
-                # suite to define defaults.
-                value = ''
-
-            query = query.filter(item.column == value)
+            value = run_parameters.pop(item.name, None)
             run.set_field(item, value)
 
         # Any remaining parameters are saved as a JSON encoded array.
         run.parameters = run_parameters
-        query = query.filter(self.Run.parameters_data == run.parameters_data)
+        self.add(run)
+        return run
 
-        # Execute the query to see if we already have this run.
-        try:
-            return query.one(),False
-        except sqlalchemy.orm.exc.NoResultFound:
-            # If not, add the run.
-            self.add(run)
-
-            return run,True
-
-    def _importSampleValues(self, tests_data, run, tag, commit, config):
-        # We now need to transform the old schema data (composite samples split
-        # into multiple tests with mangling) into the V4DB format where each
-        # sample is a complete record.
-        tag_dot = "%s." % tag
-        tag_dot_len = len(tag_dot)
-
+    def _importSampleValues(self, tests_data, run, commit, config):
         # Load a map of all the tests, which we will extend when we find tests
         # that need to be added.
         # str call works around an issue where unicode test names were not
@@ -848,112 +967,53 @@ supplied run is missing required run parameter: %r""" % (
         test_cache = dict((str(test.name), test)
                           for test in self.query(self.Test))
 
-        # First, we aggregate all of the samples by test name. The schema allows
-        # reporting multiple values for a test in two ways, one by multiple
-        # samples and the other by multiple test entries with the same test
-        # name. We need to handle both.
-        tests_values = {}
+        profiles = dict()
+        field_dict = dict([(f.name, f) for f in self.sample_fields])
         for test_data in tests_data:
-            if test_data['Info']:
-                raise ValueError,"""\
-test parameter sets are not supported by V4DB databases"""
-
-            name = test_data['Name']
-            if not name.startswith(tag_dot):
-                raise ValueError,"""\
-test %r is misnamed for reporting under schema %r""" % (
-                    name, tag)
-            name = name[tag_dot_len:]
-
-            # Add all the values.
-            values = tests_values.get(name)
-            if values is None:
-                tests_values[name] = values = []
-
-            values.extend(test_data['Data'])
-
-        # Next, build a map of test name to sample values, by scanning all the
-        # tests. This is complicated by the interchange's support of multiple
-        # values, which we cannot properly aggregate. We handle this by keying
-        # off of the test name and the sample index.
-        sample_records = {}
-        profiles = {}
-        for name,test_samples in tests_values.items():
-            # Map this reported test name into a test name and a sample field.
-            #
-            # FIXME: This is really slow.
-            if name.endswith('.profile'):
-                test_name = name[:-len('.profile')]
-                sample_field = 'profile'
-            else:
-                for item in self.sample_fields:
-                    if name.endswith(item.info_key):
-                        test_name = name[:-len(item.info_key)]
-                        sample_field = item
-                        break
-                else:
-                    # Disallow tests which do not map to a sample field.
-                    raise ValueError,"""\
-    test %r does not map to a sample field in the reported suite""" % (
-                        name)
-
-            # Get or create the test.
-            test = test_cache.get(str(test_name))
+            name = test_data['name']
+            test = test_cache.get(name)
             if test is None:
-                import pprint
-                try:
-                    test = self.query(self.Test).filter(self.Test.name == test_name).one()
-                    test_cache[str(test_name)] = test
+                test = self.Test(test_data['name'])
+                test_cache[name] = test
+                self.add(test)
 
-                except:
-                    warning("Found a new test: " + test_name + "Full name: " + name)
-                    note("Test cache state:" + pprint.pformat(test_cache))
-                    test_cache[str(test_name)] = test = self.Test(test_name)
-                    assert test_cache.get(str(test_name)) == test
-                    self.add(test)
+            samples = []
+            for key, values in test_data.items():
+                if key == 'name' or key == "id" or key.endswith("_id"):
+                    continue
+                field = field_dict.get(key)
+                if field is None and key != 'profile':
+                    raise ValueError("test %r: Metric %r unknown in suite " %
+                                     (name, key))
 
-            for i, value in enumerate(test_samples):
-                record_key = (test_name, i)
-                sample = sample_records.get(record_key)
-                if sample is None:
-                    sample_records[record_key] = sample = self.Sample(run, test)
+                if not isinstance(values, list):
+                    values = [values]
+                while len(samples) < len(values):
+                    sample = self.Sample(run, test)
                     self.add(sample)
+                    samples.append(sample)
+                for sample, value in zip(samples, values):
+                    if key == 'profile':
+                        profile = self.Profile(value, config, name)
+                        sample.profile = profiles.get(hash(value), profile)
+                    else:
+                        sample.set_field(field, value)
 
-                if sample_field != 'profile':
-                    sample.set_field(sample_field, value)
-                else:
-                    sample.profile = profiles.get(hash(value),
-                                                  self.Profile(value, config,
-                                                               test_name))
-
-    def importDataFromDict(self, data, commit, config=None):
+    def importDataFromDict(self, data, commit, config, updateMachine,
+                           mergeRun):
         """
-        importDataFromDict(data) -> bool, Run
+        importDataFromDict(data, commit, config, updateMachine, mergeRun)
+            -> Run  (or throws ValueError exception)
 
-        Import a new run from the provided test interchange data, and return the
-        constructed Run record.
-
-        The boolean result indicates whether the returned record was constructed
-        or not (i.e., whether the data was a duplicate submission).
+        Import a new run from the provided test interchange data, and return
+        the constructed Run record. May throw ValueError exceptions in cases
+        like mismatching machine data or duplicate run submission with
+        mergeRun == 'reject'.
         """
-
-        # Construct the machine entry.
-        machine,inserted = self._getOrCreateMachine(data['Machine'])
-
-        # Construct the run entry.
-        run,inserted = self._getOrCreateRun(data['Run'], machine)
-
-        # Get the schema tag.
-        tag = data['Run']['Info']['tag']
-        
-        # If we didn't construct a new run, this is a duplicate
-        # submission. Return the prior Run.
-        if not inserted:
-            return False, run
-        
-        self._importSampleValues(data['Tests'], run, tag, commit, config)
-
-        return True, run
+        machine = self._getOrCreateMachine(data['machine'], updateMachine)
+        run = self._getOrCreateRun(data['run'], machine, mergeRun)
+        self._importSampleValues(data['tests'], run, commit, config)
+        return run
 
     # Simple query support (mostly used by templates)
 
@@ -969,9 +1029,9 @@ test %r is misnamed for reporting under schema %r""" % (
     def getRun(self, id):
         return self.query(self.Run).filter_by(id=id).one()
 
-    def get_adjacent_runs_on_machine(self, run, N, direction = -1):
+    def get_adjacent_runs_on_machine(self, run, N, direction=-1):
         """
-        get_adjacent_runs_on_machine(run, N, direction = -1) -> [Run*]
+        get_adjacent_runs_on_machine(run, N, direction=-1) -> [Run*]
 
         Return the N runs which have been submitted to the same machine and are
         adjacent to the given run.
@@ -988,7 +1048,7 @@ test %r is misnamed for reporting under schema %r""" % (
         assert N >= 0, "invalid count"
         assert direction in (-1, 1), "invalid direction"
 
-        if N==0:
+        if N == 0:
             return []
 
         # The obvious algorithm here is to step through the run orders in the
@@ -1002,16 +1062,16 @@ test %r is misnamed for reporting under schema %r""" % (
         # order and the last order the machine reported at.
         #
         # In such cases, we could end up executing a large number of individual
-        # SA object materializations in traversing the order list, which is very
-        # bad.
+        # SA object materializations in traversing the order list, which is
+        # very bad.
         #
         # We currently solve this by instead finding all the orders reported on
         # this machine, ordering those programatically, and then iterating over
         # that. This performs worse (O(N) instead of O(1)) than the obvious
-        # algorithm in the common case but more uniform and significantly better
-        # in the worst cast, and I prefer that response times be uniform. In
-        # practice, this appears to perform fine even for quite large (~1GB,
-        # ~20k runs) databases.
+        # algorithm in the common case but more uniform and significantly
+        # better in the worst cast, and I prefer that response times be
+        # uniform. In practice, this appears to perform fine even for quite
+        # large (~1GB, ~20k runs) databases.
 
         # Find all the orders on this machine, then sort them.
         #
@@ -1046,15 +1106,27 @@ test %r is misnamed for reporting under schema %r""" % (
         #
         # Even though we already know the right order, this is faster than
         # issueing separate queries.
-        runs.sort(key = lambda r: r.order, reverse = (direction==-1))
+        runs.sort(key=lambda r: r.order, reverse=(direction == -1))
 
         return runs
 
     def get_previous_runs_on_machine(self, run, N):
-        return self.get_adjacent_runs_on_machine(run, N, direction = -1)
+        return self.get_adjacent_runs_on_machine(run, N, direction=-1)
 
     def get_next_runs_on_machine(self, run, N):
-        return self.get_adjacent_runs_on_machine(run, N, direction = 1)
+        return self.get_adjacent_runs_on_machine(run, N, direction=1)
 
     def __repr__(self):
         return "{} (on {})".format(self.name, self.v4db.path)
+
+    def getNumMachines(self):
+        return self.query(self.Machine).count()
+
+    def getNumRuns(self):
+        return self.query(self.Run).count()
+
+    def getNumSamples(self):
+        return self.query(self.Sample).count()
+
+    def getNumTests(self):
+        return self.query(self.Test).count()

@@ -1,13 +1,8 @@
-import hashlib
-import logging
-import os
+import click
 import platform
-import random
-import sys
 
-###
 
-kConfigVersion = (0,1,0)
+kConfigVersion = (0, 1, 0)
 kConfigTemplate = """\
 # LNT configuration file
 #
@@ -24,12 +19,12 @@ name = %(name)r
 # provide an absolute URL to the server.
 zorgURL = %(hosturl)r
 
-# Temporary directory, for use by the web app. This must be writable by the user
-# the web app runs as.
+# Temporary directory, for use by the web app. This must be writable by the
+# user the web app runs as.
 tmp_dir = %(tmp_dir)r
 
-# Database directory, for easily rerooting the entire set of databases. Database
-# paths are resolved relative to the config path + this path.
+# Database directory, for easily rerooting the entire set of databases.
+# Database paths are resolved relative to the config path + this path.
 db_dir = %(db_dir)r
 
 # Profile directory, where profiles are kept.
@@ -37,6 +32,9 @@ profile_dir = %(profile_dir)r
 
 # Secret key for this server instance.
 secret_key = %(secret_key)r
+
+# REST API authentication
+# api_auth_token = 'secret'
 
 # The list of available databases, and their properties. At a minimum, there
 # should be a 'default' entry for the default database.
@@ -81,78 +79,58 @@ if __name__ == "__main__":
     werkzeug.run_simple('%(hostname)s', 8000, application)
 """
 
-###
 
-import lnt.testing
-import lnt.server.db.migrate
+@click.command("create", short_help="create an LLVM nightly test installation")
+@click.argument("instance_path", type=click.UNPROCESSED)
+@click.option("--name", default="LNT", show_default=True,
+              help="name to use for the installation")
+@click.option("--config", default="lnt.cfg", show_default=True,
+              help="name of the LNT config file")
+@click.option("--wsgi", default="lnt.wsgi", show_default=True,
+              help="name of the WSGI app")
+@click.option("--tmp-dir", default="lnt_tmp", show_default=True,
+              help="name of the temp file directory")
+@click.option("--db-dir", default="data", show_default=True,
+              help="name of the directory to hold databases")
+@click.option("--profile-dir", default="data/profiles", show_default=True,
+              help="name of the directory to hold profiles")
+@click.option("--default-db", default="lnt.db", show_default=True,
+              help="name for the default db")
+@click.option("--secret-key", default=None,
+              help="secret key to use for this installation")
+@click.option("--hostname", default=platform.uname()[1], show_default=True,
+              help="host name of the server")
+@click.option("--hostsuffix", default="perf", show_default=True,
+              help="suffix at which WSGI app lives")
+@click.option("--show-sql", is_flag=True,
+              help="show SQL statements executed during construction")
+def action_create(instance_path, name, config, wsgi, tmp_dir, db_dir,
+                  profile_dir, default_db, secret_key, hostname, hostsuffix,
+                  show_sql):
+    """create an LLVM nightly test installation
 
-def action_create(name, args):
-    """create an LLVM nightly test installation"""
+\b
+* INSTANCE_PATH should point to a directory that will keep
+LNT configuration.
+    """
+    from .common import init_logger
+    import hashlib
+    import lnt.server.db.migrate
+    import lnt.server.db.util
+    import lnt.testing
+    import logging
+    import os
+    import random
+    import sys
 
-    from optparse import OptionParser, OptionGroup
-    parser = OptionParser("%s [options] <path>" % name)
-    parser.add_option("", "--name", dest="name", default="LNT",
-                      help="name to use for the installation [%default]")
-    parser.add_option("", "--config", dest="config", default="lnt.cfg",
-                      help="name of the LNT config file [%default]")
-    parser.add_option("", "--wsgi", dest="wsgi",  default="lnt.wsgi",
-                      help="name of the WSGI app  [%default]")
-    parser.add_option("", "--tmp-dir", dest="tmp_dir", default="lnt_tmp",
-                      help="name of the temp file directory [%default]")
-    parser.add_option("", "--db-dir", dest="db_dir", default="data",
-                      help="name of the directory to hold databases")
-    parser.add_option("", "--profile-dir", dest="profile_dir", default="data/profiles",
-                      help="name of the directory to hold databases")    
-    parser.add_option("", "--default-db", dest="default_db", default="lnt.db",
-                      help="name for the default db [%default]", metavar="NAME")
-    parser.add_option("", "--secret-key", dest="secret_key", default=None,
-                      help="secret key to use for this installation")
-    parser.add_option("", "--hostname", dest="hostname",
-                      default=platform.uname()[1],
-                      help="host name of the server [%default]", metavar="NAME")
-    parser.add_option("", "--hostsuffix", dest="hostsuffix", default="perf",
-                      help="suffix at which WSGI app lives [%default]",
-                      metavar="NAME")
-    parser.add_option("", "--show-sql", dest="show_sql", action="store_true",
-                      help="show SQL statements executed during construction",
-                      default=False)
+    init_logger(logging.INFO if show_sql else logging.WARNING,
+                show_sql=show_sql)
 
-    (opts, args) = parser.parse_args(args)
-    if len(args) != 1:
-        parser.error("invalid number of arguments")
-
-    path, = args
-
-    # Setup the base LNT logger.
-    logger = logging.getLogger("lnt")
-    logger.setLevel(logging.WARNING)
-    handler = logging.StreamHandler(sys.stderr)
-    handler.setFormatter(logging.Formatter(
-            '%(asctime)s %(levelname)s: %(message)s',
-            datefmt='%Y-%m-%d %H:%M:%S'))
-    logger.addHandler(handler)
-
-    # Enable full SQL logging, if requested.
-    if opts.show_sql:
-        sa_logger = logging.getLogger("sqlalchemy")
-        sa_logger.setLevel(logging.INFO)
-        sa_logger.addHandler(handler)
-
-    # Set up locals we use later for substitution.
-    name = opts.name
-    config = opts.config
-    wsgi = opts.wsgi
-    tmp_dir = opts.tmp_dir
-    db_dir = opts.db_dir
-    profile_dir = opts.profile_dir
-    default_db = opts.default_db
-    hostname = opts.hostname
-    hostsuffix = opts.hostsuffix
     default_db_version = "0.4"
 
-    basepath = os.path.abspath(path)
+    basepath = os.path.abspath(instance_path)
     if os.path.exists(basepath):
-        raise SystemExit,"error: invalid path: %r already exists" % path
+        raise SystemExit("error: invalid path: %r already exists" % basepath)
 
     hosturl = "http://%s/%s" % (hostname, hostsuffix)
 
@@ -160,14 +138,16 @@ def action_create(name, args):
     cfg_path = os.path.join(basepath, config)
     tmp_path = os.path.join(basepath, tmp_dir)
     wsgi_path = os.path.join(basepath, wsgi)
-    secret_key = (opts.secret_key or
+    schemas_path = os.path.join(basepath, "schemas")
+    secret_key = (secret_key or
                   hashlib.sha1(str(random.getrandbits(256))).hexdigest())
 
-    os.mkdir(path)
+    os.mkdir(instance_path)
     os.mkdir(tmp_path)
+    os.mkdir(schemas_path)
 
     # If the path does not contain database type, assume relative path.
-    if "://" not in db_dir:
+    if lnt.server.db.util.path_has_no_database_type(db_dir):
         db_dir_path = os.path.join(basepath, db_dir)
         db_path = os.path.join(db_dir_path, default_db)
         os.mkdir(db_dir_path)
