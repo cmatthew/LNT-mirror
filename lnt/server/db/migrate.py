@@ -114,9 +114,6 @@ def _load_migrations():
 
 ###
 # Auto-upgrading support.
-
-logger = logging.getLogger(__name__)
-
 def _set_schema_version(engine, schema_name, new_version):
     # Keep the updating to a single transaction that is immediately committed.
     session = sqlalchemy.orm.sessionmaker(engine)()
