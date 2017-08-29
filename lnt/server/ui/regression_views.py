@@ -17,10 +17,10 @@ from wtforms.validators import DataRequired
 from lnt.server.ui.decorators import v4_route
 import lnt.server.reporting.analysis
 from lnt.server.ui.globals import v4_url_for
+from lnt.server.ui.views import ts_data
 
 from lnt.util import logger
-from lnt.server.ui.util import FLASH_DANGER, FLASH_SUCCESS
-from lnt.server.reporting.analysis import REGRESSED
+from lnt.server.ui.util import FLASH_DANGER, FLASH_SUCCESS, PrecomputedCR
 import lnt.server.db.fieldchange
 from lnt.server.db.regression import RegressionState, new_regression
 from lnt.server.db.regression import get_first_runs_of_fieldchange
@@ -47,30 +47,6 @@ class TriagePageSelectedForm(Form):
 
 def get_fieldchange(ts, id):
     return ts.query(ts.FieldChange).filter(ts.FieldChange.id == id).one()
-
-
-class PrecomputedCR():
-    """Make a thing that looks like a comprison result, that is derived
-    from a field change."""
-    previous = 0
-    current = 0
-    pct_delta = 0.00
-    bigger_is_better = False
-
-    def __init__(self, old, new, bigger_is_better):
-        self.previous = old
-        self.current = new
-        self.delta = new - old
-        self.pct_delta = self.delta / old
-
-    def get_test_status(self):
-        return True
-
-    def get_value_status(self, ignore_small=True):
-        return REGRESSED
-
-    def __json__(self):
-        return self.__dict__
 
 
 @v4_route("/regressions/new", methods=["GET", "POST"])
@@ -121,7 +97,7 @@ def v4_new_regressions():
     return render_template("v4_new_regressions.html",
                            testsuite_name=g.testsuite_name,
                            changes=crs, analysis=lnt.server.reporting.analysis,
-                           form=form)
+                           form=form, **ts_data(ts))
 
 
 def calc_impact(ts, fcs):
@@ -253,7 +229,8 @@ def v4_regression_list():
                            sizes=regression_sizes,
                            impacts=impacts,
                            ages=ages,
-                           analysis=lnt.server.reporting.analysis)
+                           analysis=lnt.server.reporting.analysis,
+                           **ts_data(ts))
 
 
 def _get_regressions_from_selected_form(form, ts):
@@ -401,7 +378,8 @@ def v4_regression_detail(id):
                            testsuite_name=g.testsuite_name,
                            regression=regression_info, changes=crs,
                            form=form, analysis=lnt.server.reporting.analysis,
-                           check_all=checkbox_state)
+                           check_all=checkbox_state,
+                           **ts_data(ts))
 
 
 @v4_route("/hook", methods=["GET"])

@@ -31,7 +31,7 @@ class SearchTest(unittest.TestCase):
                          ('supermachine', '7623')]
         
         # Get the database.
-        self.db = config.get_database('default', echo=False)
+        self.db = config.get_database('default')
         # Load the database.
         for r in imported_runs:
             with tempfile.NamedTemporaryFile() as f:
@@ -108,7 +108,6 @@ class SearchTest(unittest.TestCase):
         ])
 
 if __name__ == '__main__':
-    global base_path
     if len(sys.argv) > 1:
         base_path = sys.argv[1]
     unittest.main(argv=[sys.argv[0], ])

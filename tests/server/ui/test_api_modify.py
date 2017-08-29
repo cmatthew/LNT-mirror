@@ -36,6 +36,38 @@ class JSONAPIDeleteTester(unittest.TestCase):
         self.client = app.test_client()
         self.shared_inputs = shared_inputs
 
+    def test_00_update_machine(self):
+        """Check PUT request to /machines/n"""
+        client = self.client
+
+        # We are going to set the 'os' field to none, remove the 'uname'
+        # parameter and add the 'new_parameter' parameter.
+        # Make sure none of those things happened yet:
+        machine_before = check_json(client, 'api/db_default/v4/nts/machines/1')
+        machine_before = machine_before['machine']
+        self.assertIsNotNone(machine_before.get('os', None))
+        self.assertIsNone(machine_before.get('new_parameter', None))
+        self.assertIsNotNone(machine_before.get('uname', None))
+
+        data = {
+            'machine': {
+                'hardware': 'hal 9000',
+                'os': None,
+                'hostname': 'localhost',
+                'new_parameter': True,
+            },
+        }
+        json_data = json.dumps(data)
+        resp = client.put('api/db_default/v4/nts/machines/1', data=json_data,
+                          headers={'AuthToken': 'test_token'})
+        self.assertEqual(resp.status_code, 200)
+
+        machine_after = check_json(client, 'api/db_default/v4/nts/machines/1')
+        machine_after = machine_after['machine']
+        for key in ('hardware', 'os', 'hostname', 'new_parameter', 'uname'):
+            self.assertEquals(machine_after.get(key, None),
+                              data['machine'].get(key, None))
+
     def test_00_rename_machine(self):
         """Check rename POST request to /machines/n"""
         client = self.client
@@ -103,8 +135,6 @@ class JSONAPIDeleteTester(unittest.TestCase):
         for run_id in run_ids:
             resp = check_json(client,
                               'api/db_default/v4/nts/runs/{}'.format(run_id))
-            import pprint
-            pprint.pprint(resp['tests'])
             sample_ids.append([s['id'] for s in resp['tests']])
         self.assertNotEqual(len(sample_ids), 0)
 
@@ -152,6 +182,16 @@ Deleted machine machine2:2
         self.assertIn('http://localhost/api/db_default/v4/nts/runs/', resp.headers['Location'])
         resp_json = json.loads(resp.data)
         self.assertEqual(resp_json['run_id'], 5)
+
+        # Provoke a failing submission.
+        resp = client.post('api/db_default/v4/nts/runs?merge=reject',
+                           data=data,
+                           headers={'AuthToken': 'test_token'})
+        self.assertEqual(resp.status_code, 400)
+        resp_json = json.loads(resp.data)
+        self.assertEqual(resp_json['error'],
+                         "import failure: Duplicate submission for '1'")
+        self.assertEqual(resp_json['success'], False)
 
     def test_04_merge_into(self):
         """Check POST/merge into request for /machines."""

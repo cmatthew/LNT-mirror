@@ -36,11 +36,12 @@ import lnt.util.stats
 from lnt.server.reporting.analysis import ComparisonResult, calc_geomean
 from lnt.server.ui.decorators import frontend, db_route, v4_route
 from lnt.server.ui.globals import db_url_for, v4_url_for
-from lnt.server.ui.regression_views import PrecomputedCR
 from lnt.server.ui.util import FLASH_DANGER, FLASH_SUCCESS, FLASH_INFO
+from lnt.server.ui.util import PrecomputedCR
 from lnt.server.ui.util import mean
 from lnt.util import async_ops
 from lnt.util import logger
+from lnt.util import multidict
 from lnt.server.ui.util import baseline_key, convert_revision
 
 
@@ -90,7 +91,7 @@ def select_db():
 # Per-Database Routes
 
 
-@db_route('/', only_v3=False)
+@db_route('/')
 def index():
     return render_template("index.html")
 
@@ -98,9 +99,6 @@ def index():
 ###
 # Database Actions
 def _do_submit():
-    if request.method == 'GET':
-        return render_template("submit_run.html")
-
     assert request.method == 'POST'
     input_file = request.files.get('file')
     input_data = request.form.get('input_data')
@@ -161,9 +159,25 @@ def _do_submit():
     return response
 
 
-@db_route('/submitRun', only_v3=False, methods=('GET', 'POST'))
+def ts_data(ts):
+    """Data about the current testsuite used by layout.html which should be
+    present in most templates."""
+    baseline_id = session.get(baseline_key())
+    baselines = ts.query(ts.Baseline).all()
+    return {
+        'baseline_id': baseline_id,
+        'baselines': baselines,
+        'ts': ts
+    }
+
+
+@db_route('/submitRun', methods=('GET', 'POST'))
 def submit_run():
     """Compatibility url that hardcodes testsuite to 'nts'"""
+    if request.method == 'GET':
+        g.testsuite_name = 'nts'
+        return redirect(v4_url_for('.v4_submitRun'))
+
     # This route doesn't know the testsuite to use. We have some defaults/
     # autodetection for old submissions, but really you should use the full
     # db_XXX/v4/YYYY/submitRun URL when using non-nts suites.
@@ -172,7 +186,10 @@ def submit_run():
 
 
 @v4_route('/submitRun', methods=('GET', 'POST'))
-def submit_run_ts():
+def v4_submitRun():
+    if request.method == 'GET':
+        ts = request.get_testsuite()
+        return render_template("submit_run.html", **ts_data(ts))
     return _do_submit()
 
 ###
@@ -181,8 +198,9 @@ def submit_run_ts():
 
 @v4_route("/")
 def v4_overview():
-    return render_template("v4_overview.html",
-                           testsuite_name=g.testsuite_name)
+    ts = request.get_testsuite()
+    return render_template("v4_overview.html", testsuite_name=g.testsuite_name,
+                           **ts_data(ts))
 
 
 @v4_route("/recent_activity")
@@ -212,7 +230,7 @@ def v4_recent_activity():
                            testsuite_name=g.testsuite_name,
                            active_machines=active_machines,
                            active_submissions=active_submissions,
-                           ts=ts)
+                           **ts_data(ts))
 
 
 @v4_route("/machine/")
@@ -221,9 +239,10 @@ def v4_machines():
 
     # Gather all the runs on this machine.
     ts = request.get_testsuite()
+    machines = ts.query(ts.Machine)
 
-    return render_template("all_machines.html",
-                           ts=ts)
+    return render_template("all_machines.html", machines=machines,
+                           **ts_data(ts))
 
 
 @v4_route("/machine/<int:machine_id>/latest")
@@ -266,7 +285,7 @@ def v4_machine(id):
     # Gather all the runs on this machine.
     ts = request.get_testsuite()
 
-    associated_runs = util.multidict(
+    associated_runs = multidict.multidict(
         (run_order, r)
         for r, run_order in (ts.query(ts.Run, ts.Order)
                              .join(ts.Order)
@@ -300,7 +319,8 @@ def v4_machine(id):
                                testsuite_name=g.testsuite_name,
                                id=id,
                                associated_runs=associated_runs,
-                               machines=machines)
+                               machines=machines,
+                               **ts_data(ts))
     except NoResultFound:
         abort(404)
 
@@ -394,6 +414,7 @@ class V4RequestInfo(object):
         note = self.data['visible_note']
         if note:
             flash(note, FLASH_INFO)
+        self.data.update(ts_data(ts))
 
 
 @v4_route("/<int:id>/report")
@@ -413,15 +434,8 @@ def v4_text_report(id):
 
 
 # Compatilibity route for old run pages.
-@db_route("/simple/<tag>/<int:id>/", only_v3=False)
+@db_route("/simple/<tag>/<int:id>/")
 def simple_run(tag, id):
-    # Attempt to find a V4 run which declares that it matches this simple run
-    # ID. We do this so we can preserve some URL compatibility for old
-    # databases.
-    if g.db_info.db_version != '0.4':
-        return render_template("error.html", message="""\
-Invalid URL for version %r database.""" % (g.db_info.db_version,))
-
     # Get the expected test suite.
     db = request.get_db()
     ts = db.testsuite[tag]
@@ -438,7 +452,7 @@ Invalid URL for version %r database.""" % (g.db_info.db_version,))
 
     # Otherwise, report an error.
     return render_template("error.html", message="""\
-Unable to find a v0.4 run for this ID. Please use the native v0.4 URL interface
+Unable to find a run for this ID. Please use the native v4 URL interface
 (instead of the /simple/... URL schema).""")
 
 
@@ -583,7 +597,25 @@ def v4_order(id):
     if order is None:
         abort(404)
 
-    return render_template("v4_order.html", ts=ts, order=order, form=form)
+    previous_order = None
+    if order.previous_order_id:
+        previous_order = ts.query(ts.Order) \
+            .filter(ts.Order.id == order.previous_order_id).one()
+    next_order = None
+    if order.next_order_id:
+        next_order = ts.query(ts.Order) \
+            .filter(ts.Order.id == order.next_order_id).one()
+
+    runs = ts.query(ts.Run) \
+        .filter(ts.Run.order_id == id) \
+        .options(joinedload(ts.Run.machine)) \
+        .all()
+    num_runs = len(runs)
+
+    return render_template("v4_order.html", order=order, form=form,
+                           previous_order=previous_order,
+                           next_order=next_order, runs=runs, num_runs=num_runs,
+                           **ts_data(ts))
 
 
 @v4_route("/set_baseline/<int:id>")
@@ -610,7 +642,7 @@ def v4_all_orders():
     # Order the runs totally.
     orders.sort()
 
-    return render_template("v4_all_orders.html", ts=ts, orders=orders)
+    return render_template("v4_all_orders.html", orders=orders, **ts_data(ts))
 
 
 @v4_route("/<int:id>/graph")
@@ -710,8 +742,8 @@ def v4_graph():
             continue
 
         # Ignore the extra part of the key, it is unused.
-        machine_id_str, test_id_str, field_index_str = value.split('.')
         try:
+            machine_id_str, test_id_str, field_index_str = value.split('.')
             machine_id = int(machine_id_str)
             test_id = int(test_id_str)
             field_index = int(field_index_str)
@@ -849,8 +881,8 @@ def v4_graph():
                              (field.status_field.column.is_(None)))
 
         # Aggregate by revision.
-        data = util.multidict((rev, (val, date, run_id))
-                              for val, rev, date, run_id in q).items()
+        data = multidict.multidict((rev, (val, date, run_id))
+                                   for val, rev, date, run_id in q).items()
         data.sort(key=lambda sample: convert_revision(sample[0]))
 
         graph_datum.append((test.name, data, col, field, url))
@@ -909,8 +941,8 @@ def v4_graph():
               .group_by(ts.Order.llvm_project_revision, ts.Test)
 
         # Calculate geomean of each revision.
-        data = util.multidict(((rev, date), val) for val, rev, date in q) \
-            .items()
+        data = multidict.multidict(
+                    ((rev, date), val) for val, rev, date in q).items()
         data = [(rev,
                  [(lnt.server.reporting.analysis.calc_geomean(vals), date)])
                 for ((rev, date), vals) in data]
@@ -1151,11 +1183,12 @@ def v4_graph():
         json_obj['baselines'] = baseline_plots
         return flask.jsonify(**json_obj)
 
-    return render_template("v4_graph.html", ts=ts, options=options,
+    return render_template("v4_graph.html", options=options,
                            revision_range=revision_range,
                            graph_plots=graph_plots,
                            overview_plots=overview_plots, legend=legend,
-                           baseline_plots=baseline_plots)
+                           baseline_plots=baseline_plots,
+                           **ts_data(ts))
 
 
 @v4_route("/global_status")
@@ -1190,7 +1223,7 @@ def v4_global_status():
     recent_runs = ts.query(ts.Run).filter(ts.Run.start_time > yesterday).all()
 
     # Aggregate the runs by machine.
-    recent_runs_by_machine = util.multidict()
+    recent_runs_by_machine = multidict.multidict()
     for run in recent_runs:
         recent_runs_by_machine[run.machine] = run
 
@@ -1223,9 +1256,9 @@ def v4_global_status():
         # Choose the "best" run to report on. We want the most recent one with
         # the most recent order.
         run = max(runs, key=lambda r: (r.order, r.start_time))
-
-        machine_run_info.append((baseline, run))
-        reported_run_ids.append(baseline.id)
+        if baseline:
+            machine_run_info.append((baseline, run))
+            reported_run_ids.append(baseline.id)
         reported_run_ids.append(run.id)
 
     # Get the set all tests reported in the recent runs.
@@ -1261,12 +1294,12 @@ def v4_global_status():
     test_table.sort(key=lambda row: row[1], reverse=True)
 
     return render_template("v4_global_status.html",
-                           ts=ts,
                            tests=test_table,
                            machines=recent_machines,
                            fields=metric_fields,
                            selected_field=field,
-                           selected_revision=revision)
+                           selected_revision=revision,
+                           **ts_data(ts))
 
 
 @v4_route("/daily_report")
@@ -1325,8 +1358,9 @@ def v4_daily_report(year, month, day):
     except ValueError:
         return abort(400)
 
-    return render_template("v4_daily_report.html", ts=ts, report=report,
-                           analysis=lnt.server.reporting.analysis)
+    return render_template("v4_daily_report.html", report=report,
+                           analysis=lnt.server.reporting.analysis,
+                           **ts_data(ts))
 
 ###
 # Cross Test-Suite V4 Views
@@ -1337,7 +1371,7 @@ def get_summary_config_path():
                         'summary_report_config.json')
 
 
-@db_route("/summary_report/edit", only_v3=False, methods=('GET', 'POST'))
+@db_route("/summary_report/edit", methods=('GET', 'POST'))
 def v4_summary_report_ui():
     # If this is a POST request, update the saved config.
     if request.method == 'POST':
@@ -1387,7 +1421,7 @@ def v4_summary_report_ui():
                            all_orders=all_orders)
 
 
-@db_route("/summary_report", only_v3=False)
+@db_route("/summary_report")
 def v4_summary_report():
     # Load the summary report configuration.
     config_path = get_summary_config_path()
@@ -1429,7 +1463,10 @@ def rules():
 @frontend.route('/log')
 def log():
     async_ops.check_workers(True)
-    return render_template("log.html")
+    with open(current_app.config['log_file_name'], 'r') as f:
+        log_lines = f.readlines()
+    r'2017-07-21 15:02:15,143 ERROR:'
+    return render_template("log.html", log_lines=log_lines)
 
 
 @frontend.route('/debug')
@@ -1736,7 +1773,8 @@ def v4_matrix():
                            baseline_name=baseline_name,
                            machine_name_common=machine_name_common,
                            machine_id_common=machine_id_common,
-                           order_to_date=order_to_date)
+                           order_to_date=order_to_date,
+                           **ts_data(ts))
 
 
 @frontend.route("/explode")

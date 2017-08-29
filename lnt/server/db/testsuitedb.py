@@ -115,6 +115,11 @@ class TestSuiteDB(object):
                     result[field.name] = value
                 return result
 
+            def set_fields_pop(self, data_dict):
+                for field in self.fields:
+                    value = data_dict.pop(field.name, None)
+                    self.set_field(field, value)
+
         db_key_name = self.test_suite.db_key_name
 
         class Machine(self.base, ParameterizedMixin):
@@ -199,6 +204,15 @@ class TestSuiteDB(object):
                         .order_by(ts.Run.start_time.desc()).first()
 
                 return closest_run
+
+            def set_from_dict(self, data):
+                data_name = data.pop('name', None)
+                # This function is not meant for renaming. Abort on mismatch.
+                if data_name is not None and data_name != self.name:
+                    raise ValueError("Mismatching machine name")
+                data.pop('id', None)
+                self.set_fields_pop(data)
+                self.parameters = data
 
             def __json__(self):
                 result = dict()
@@ -324,7 +338,7 @@ class TestSuiteDB(object):
             # The parameters blob is used to store any additional information
             # reported by the run but not promoted into the machine record.
             # Such data is stored as a JSON encoded blob.
-            parameters_data = Column("Parameters", Binary)
+            parameters_data = Column("Parameters", Binary, index=False, unique=False)
 
             machine = relation(Machine)
             order = relation(Order)
@@ -804,25 +818,23 @@ class TestSuiteDB(object):
         for field in self.machine_fields:
             existing_value = existing.get_field(field)
             new_value = machine.get_field(field)
-            if existing_value is None:
+            if new_value is None or existing_value == new_value:
+                continue
+            if existing_value is None or forceUpdate:
                 existing.set_field(field, new_value)
-            elif existing_value != new_value:
-                if not forceUpdate:
-                    raise MachineInfoChanged("'%s' on machine '%s' changed." %
-                                             (field.name, name))
-                else:
-                    existing.set_field(field, new_value)
+            else:
+                raise MachineInfoChanged("'%s' on machine '%s' changed." %
+                                         (field.name, name))
         existing_parameters = existing.parameters
-        for key, value in machine.parameters.items():
+        for key, new_value in machine.parameters.items():
             existing_value = existing_parameters.get(key, None)
-            if existing_value is None:
+            if new_value is None or existing_value == new_value:
+                continue
+            if existing_value is None or forceUpdate:
                 existing_parameters[key] = value
-            elif existing_value != value:
-                if not forceUpdate:
-                    raise MachineInfoChanged("'%s' on machine '%s' changed." %
-                                             (key, name))
-                else:
-                    existing_parameters[key] = value
+            else:
+                raise MachineInfoChanged("'%s' on machine '%s' changed." %
+                                         (key, name))
         existing.parameters = existing_parameters
         return existing
 
@@ -959,18 +971,17 @@ class TestSuiteDB(object):
         self.add(run)
         return run
 
-    def _importSampleValues(self, tests_data, run, commit, config):
+    def _importSampleValues(self, tests_data, run, config):
         # Load a map of all the tests, which we will extend when we find tests
         # that need to be added.
-        # str call works around an issue where unicode test names were not
-        # matching.
+        # Downcast to str, so we match on MySQL.
         test_cache = dict((str(test.name), test)
                           for test in self.query(self.Test))
 
         profiles = dict()
         field_dict = dict([(f.name, f) for f in self.sample_fields])
         for test_data in tests_data:
-            name = test_data['name']
+            name = str(test_data['name'])
             test = test_cache.get(name)
             if test is None:
                 test = self.Test(test_data['name'])
@@ -999,8 +1010,7 @@ class TestSuiteDB(object):
                     else:
                         sample.set_field(field, value)
 
-    def importDataFromDict(self, data, commit, config, updateMachine,
-                           mergeRun):
+    def importDataFromDict(self, data, config, updateMachine, mergeRun):
         """
         importDataFromDict(data, commit, config, updateMachine, mergeRun)
             -> Run  (or throws ValueError exception)
@@ -1012,7 +1022,7 @@ class TestSuiteDB(object):
         """
         machine = self._getOrCreateMachine(data['machine'], updateMachine)
         run = self._getOrCreateRun(data['run'], machine, mergeRun)
-        self._importSampleValues(data['tests'], run, commit, config)
+        self._importSampleValues(data['tests'], run, config)
         return run
 
     # Simple query support (mostly used by templates)
