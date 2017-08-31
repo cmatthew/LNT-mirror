@@ -13,10 +13,11 @@ import aniso8601
 import sqlalchemy
 from flask import session
 from sqlalchemy import *
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import relation
 from sqlalchemy.orm.exc import ObjectDeletedError
 from typing import List
-
+from lnt.util import logger
 import testsuite
 import lnt.testing.profile.profile as profile
 import lnt
@@ -989,7 +990,15 @@ class TestSuiteDB(object):
                 test = self.Test(test_data['name'])
                 test_cache[name] = test
                 self.add(test)
-
+                try:
+                    self.commit()
+                except IntegrityError as e:
+                    logger.exception("Duplicate Entry")
+                    logger.error(repr(test_cache))
+                    logger.error(repr(test_data))
+                    logger.error(repr(name))
+                    logger.error(repr(test))
+                    raise e
             samples = []
             for key, values in test_data.items():
                 if key == 'name' or key == "id" or key.endswith("_id"):
