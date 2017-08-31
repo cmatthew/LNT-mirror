@@ -992,13 +992,13 @@ class TestSuiteDB(object):
                 self.add(test)
                 try:
                     self.commit()
-                except IntegrityError as e:
+                except:
                     logger.exception("Duplicate Entry")
                     logger.error(repr(test_cache))
                     logger.error(repr(test_data))
                     logger.error(repr(name))
                     logger.error(repr(test))
-                    raise e
+                    raise
             samples = []
             for key, values in test_data.items():
                 if key == 'name' or key == "id" or key.endswith("_id"):
