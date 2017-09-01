@@ -999,13 +999,6 @@ class TestSuiteDB(object):
                         raise
                 else:
                     logger.warning("Falling back to DB query to lookup %r", name)
-                    for k in test_cache.keys():
-                        logger.warning("%r == %r: %r, %r, %r",
-                                       name,
-                                       k,
-                                       name == k,
-                                       name in test_cache.keys(),
-                                       test_cache.get(name))
                     test = test_from_db
                     test_cache[name] = test
             samples = []
