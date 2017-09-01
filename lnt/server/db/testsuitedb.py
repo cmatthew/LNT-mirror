@@ -993,13 +993,9 @@ class TestSuiteDB(object):
                 try:
                     self.commit()
                 except:
-                    print locals()
-                    logger.error("Found duplicate entry")
+                    print "Name:", repr(name)
+                    print "Keys:", repr(test_cache.keys())
                     logger.exception("Duplicate Entry")
-                    logger.error("Test Cache: %s", repr(test_cache))
-                    logger.error("Test Data: %s", repr(test_data))
-                    logger.error("Name: %s", repr(name))
-                    logger.error("Test: %s", repr(test))
                     raise
             samples = []
             for key, values in test_data.items():
