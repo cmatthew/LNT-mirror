@@ -987,16 +987,21 @@ class TestSuiteDB(object):
             name = str(test_data['name'])
             test = test_cache.get(name)
             if test is None:
-                test = self.Test(test_data['name'])
-                test_cache[name] = test
-                self.add(test)
-                try:
-                    self.commit()
-                except:
-                    print "Name:", repr(name)
-                    print "Keys:", repr(test_cache.keys())
-                    logger.exception("Duplicate Entry")
-                    raise
+                test_from_db = self.query(self.Test).filter(self.Test.name == name).one_or_none()
+                if not test_from_db:
+
+                    test = self.Test(test_data['name'])
+                    test_cache[name] = test
+                    self.add(test)
+                    try:
+                        self.commit()
+                    except:
+                        print "Name:", repr(name)
+                        print "Keys:", repr(test_cache.keys())
+                        logger.exception("Duplicate Entry")
+                        raise
+                else:
+                    test = test_from_db
             samples = []
             for key, values in test_data.items():
                 if key == 'name' or key == "id" or key.endswith("_id"):
