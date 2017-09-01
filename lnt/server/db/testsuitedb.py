@@ -995,12 +995,17 @@ class TestSuiteDB(object):
                     try:
                         self.commit()
                     except:
-                        print "Name:", repr(name)
-                        print "Keys:", repr(test_cache.keys())
                         logger.exception("Duplicate Entry")
                         raise
                 else:
                     logger.warning("Falling back to DB query to lookup %r", name)
+                    for k in test_cache.keys():
+                        logger.warning("%r == %r: %r, %r, %r",
+                                       name,
+                                       k,
+                                       name == k,
+                                       name in test_cache.keys(),
+                                       test_cache.get(name))
                     test = test_from_db
                     test_cache[name] = test
             samples = []
