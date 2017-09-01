@@ -989,7 +989,6 @@ class TestSuiteDB(object):
             if test is None:
                 test_from_db = self.query(self.Test).filter(self.Test.name == name).one_or_none()
                 if not test_from_db:
-
                     test = self.Test(test_data['name'])
                     test_cache[name] = test
                     self.add(test)
@@ -1001,7 +1000,9 @@ class TestSuiteDB(object):
                         logger.exception("Duplicate Entry")
                         raise
                 else:
+                    logger.warning("Falling back to DB query to lookup %r", name)
                     test = test_from_db
+                    test_cache[name] = test
             samples = []
             for key, values in test_data.items():
                 if key == 'name' or key == "id" or key.endswith("_id"):
