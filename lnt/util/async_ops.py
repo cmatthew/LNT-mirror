@@ -56,7 +56,7 @@ def cleanup():
             p.join(10)
     #  Some jobs may not have responded. Kill them!
     for p in JOBS:
-        note("Waited, now killing for %s %s" % (p.name, p.pid))
+        logger.info("Waited, now killing for %s %s" % (p.name, p.pid))
         p.terminate()
 
 
