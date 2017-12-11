@@ -8,7 +8,8 @@ import sqlalchemy
 #
 # Import the original schema from upgrade_0_to_1 since upgrade_6_to_7 does not
 # change the actual schema.
-from lnt.server.db.migrations.upgrade_0_to_1 import SampleType, TestSuite, SampleField
+from lnt.server.db.migrations.upgrade_0_to_1 import SampleType, TestSuite, \
+        SampleField
 
 from lnt.server.db.util import add_column
 
@@ -27,11 +28,9 @@ def upgrade(engine):
 
     ts = session.query(TestSuite).filter_by(name='nts').first()
     hash_status_field = SampleField(name="hash_status",
-                                    type=status_sample_type,
-                                    info_key=".hash.status",)
+                                    type=status_sample_type)
     hash_field = SampleField(name="hash",
                              type=hash_sample_type,
-                             info_key=".hash",
                              status_field=hash_status_field)
     ts.sample_fields.append(hash_status_field)
     ts.sample_fields.append(hash_field)

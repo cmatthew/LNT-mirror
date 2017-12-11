@@ -21,7 +21,7 @@ Example::
 
     echo -n "foo.exec 25\nbar.score 24.2\nbar/baz.size 110.0\n" > results.txt
     lnt importreport --machine=my-machine-name --order=1234 --testsuite=nts results.txt report.json
-    lnt submit http://mylnt.com/default/submitRun report.json
+    lnt submit http://mylnt.com/db_default/submitRun report.json
 
 .. _json_format:
 
@@ -42,9 +42,9 @@ First, make sure you've understood the underlying :ref:`concepts` used by LNT.
           (_String_: _String_)* // optional extra info
       },
       "run": {
-          "start_time": "%Y-%m-%dT%H:%M:%S", // mandatory, ISO8061 timestamp
-          "end_time": "%Y-%m-%dT%H:%M:%S",   // mandatory, ISO8061 timestamp, can equal start_time if not known.
-          (_String_: _String_)* // optional extra info about the run.
+          ("start_time": "%Y-%m-%dT%H:%M:%S",)? // optional, ISO8061 timestamp
+          ("end_time": "%Y-%m-%dT%H:%M:%S",)?   // optional, ISO8061 timestamp, can equal start_time if not known.
+          (_String_: _String_,)* // optional extra info about the run.
           // At least one of the extra fields is used as ordering and is
           // mandatory. For the 'nts' and 'Compile' schemas this is the
           // 'llvm_project_revision' field.
@@ -81,13 +81,14 @@ benchmark suites as well. The following metrics are supported for a test:
 * ``execution_time``: Execution time in seconds; lower is better.
 * ``score``: Benchmarking score; higher is better.
 * ``compile_time``: Compiling time in seconds; lower is better.
-* ``execution_status``: A non zero value represents an execution failure.
-* ``compilation_status``: A non zero value represents a compilation failure.
-* ``hash_status``: A non zero value represents a failure computing the
-  executable hash.
-* ``mem_byts``: Memory usage in bytes during execution; lower is better.
+* ``hash``: A string with the executable hash (usually md5sum of the stripped binary)
+* ``mem_bytes``: Memory usage in bytes during execution; lower is better.
 * ``code_size``: Code size (usually the size of the text segment) in bytes;
   lower is better.
+* ``execution_status``: A non zero value represents an execution failure.
+* ``compile_status``: A non zero value represents a compilation failure.
+* ``hash_status``: A non zero value represents a failure computing the
+  executable hash.
 
 The `run` information is expected to contain this:
 
@@ -99,15 +100,14 @@ The `run` information is expected to contain this:
 Custom Test Suites
 ------------------
 
-LNTs test suites are derived from a set of metadata definitions for each suite.
-Simply put, suites are a collections of metrics that are collected for each run.
-You can define your own test-suites if the schema in a different suite does not
-already meet your needs.
+LNT test suite schemas define which metrics can be tracked for a test and what
+extra information is known about runs and machines.  You can define your own
+test suite schemas in a yaml file. The LNT administrator has to place (or
+symlink) this yaml file into the servers schema directory.
 
-To create a schema place a yaml file into the schemas directory of your lnt
-instance. Example:
+Example:
 
-.. literalinclude:: schema-example.yaml
+.. literalinclude:: my_suite.yaml
     :language: yaml
 
 * LNT currently supports the following metric types:
@@ -119,3 +119,6 @@ instance. Example:
 
 * You need to mark at least 1 of the run fields as ``order: true`` so LNT knows
   how to sort runs.
+* Note that runs are not be limited to the fields defined in the schema for
+  the run and machine information. The fields in the schema merely declare which
+  keys get their own column in the database and a prefered treatment in the UI.

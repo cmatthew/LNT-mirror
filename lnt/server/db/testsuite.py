@@ -94,10 +94,14 @@ class TestSuite(Base):
     # as the LNT version).
     version = Column("Version", String(16))
 
-    machine_fields = relation('MachineField', backref='test_suite')
-    order_fields = relation('OrderField', backref='test_suite')
-    run_fields = relation('RunField', backref='test_suite')
-    sample_fields = relation('SampleField', backref='test_suite')
+    machine_fields = relation('MachineField', backref='test_suite',
+                              lazy='immediate')
+    order_fields = relation('OrderField', backref='test_suite',
+                            lazy='immediate')
+    run_fields = relation('RunField', backref='test_suite',
+                          lazy='immediate')
+    sample_fields = relation('SampleField', backref='test_suite',
+                             lazy='immediate')
 
     def __init__(self, name, db_key_name):
         self.name = name
@@ -119,7 +123,7 @@ class TestSuite(Base):
         machine_fields = []
         for field_desc in data.get('machine_fields', []):
             name = field_desc['name']
-            field = MachineField(name, info_key=None)
+            field = MachineField(name)
             machine_fields.append(field)
         ts.machine_fields = machine_fields
 
@@ -129,10 +133,10 @@ class TestSuite(Base):
             name = field_desc['name']
             is_order = field_desc.get('order', False)
             if is_order:
-                field = OrderField(name, info_key=None, ordinal=0)
+                field = OrderField(name, ordinal=0)
                 order_fields.append(field)
             else:
-                field = RunField(name, info_key=None)
+                field = RunField(name)
                 run_fields.append(field)
         ts.run_fields = run_fields
         ts.order_fields = order_fields
@@ -143,18 +147,64 @@ class TestSuite(Base):
             name = metric_desc['name']
             bigger_is_better = metric_desc.get('bigger_is_better', False)
             metric_type_name = metric_desc.get('type', 'Real')
+            display_name = metric_desc.get('display_name')
+            unit = metric_desc.get('unit')
+            unit_abbrev = metric_desc.get('unit_abbrev')
             if not testsuitedb.is_known_sample_type(metric_type_name):
                 raise ValueError("Unknown metric type '%s'" %
                                  metric_type_name)
             metric_type = SampleType(metric_type_name)
             bigger_is_better_int = 1 if bigger_is_better else 0
-            field = SampleField(name, metric_type, info_key=None,
-                                status_field=None,
-                                bigger_is_better=bigger_is_better_int)
+            field = SampleField(name, metric_type, status_field=None,
+                                bigger_is_better=bigger_is_better_int,
+                                display_name=display_name, unit=unit,
+                                unit_abbrev=unit_abbrev)
             sample_fields.append(field)
         ts.sample_fields = sample_fields
         ts.jsonschema = data
         return ts
+
+    def __json__(self):
+        metrics = []
+        for sample_field in self.sample_fields:
+            metric = {
+                'bigger_is_better': (sample_field.bigger_is_better != 0),
+                'display_name': sample_field.display_name,
+                'name': sample_field.name,
+                'type': sample_field.type.name,
+                'unit': sample_field.unit,
+                'unit_abbrev': sample_field.unit_abbrev,
+            }
+            metrics.append(metric)
+        machine_fields = []
+        for machine_field in self.machine_fields:
+            field = {
+                'name': machine_field.name
+            }
+            machine_fields.append(field)
+        run_fields = []
+        for run_field in self.run_fields:
+            field = {
+                'name': run_field.name
+            }
+            run_fields.append(field)
+        for order_field in self.order_fields:
+            field = {
+                'name': order_field.name,
+                'order': True,
+            }
+            run_fields.append(field)
+        metrics.sort(key=lambda x: x['name'])
+        machine_fields.sort(key=lambda x: x['name'])
+        run_fields.sort(key=lambda x: x['name'])
+
+        return {
+            'format_version': '2',
+            'machine_fields': machine_fields,
+            'metrics': metrics,
+            'name': self.name,
+            'run_fields': run_fields,
+        }
 
 
 class FieldMixin(object):
@@ -174,24 +224,18 @@ class MachineField(FieldMixin, Base):
                            index=True)
     name = Column("Name", String(256))
 
-    # The info key describes the key to expect this field to be present as in
-    # the reported machine information. Missing keys result in NULL values in
-    # the database.
-    info_key = Column("InfoKey", String(256))
-
-    def __init__(self, name, info_key):
+    def __init__(self, name):
         self.name = name
-        self.info_key = info_key
 
         # Column instance for fields which have been bound (non-DB
         # parameter). This is provided for convenience in querying.
         self.column = None
 
     def __repr__(self):
-        return '%s%r' % (self.__class__.__name__, (self.name, self.info_key))
+        return '%s%r' % (self.__class__.__name__, (self.name, ))
 
-    def duplicate(self):
-        return MachineField(self.name, self.info_key)
+    def __copy__(self):
+        return MachineField(self.name)
 
 
 class OrderField(FieldMixin, Base):
@@ -202,20 +246,14 @@ class OrderField(FieldMixin, Base):
                            index=True)
     name = Column("Name", String(256))
 
-    # The info key describes the key to expect this field to be present as in
-    # the reported machine information. Missing keys result in NULL values in
-    # the database.
-    info_key = Column("InfoKey", String(256))
-
     # The ordinal index this field should be used at for creating a
     # lexicographic ordering amongst runs.
     ordinal = Column("Ordinal", Integer)
 
-    def __init__(self, name, info_key, ordinal):
+    def __init__(self, name, ordinal):
         assert isinstance(ordinal, int) and ordinal >= 0
 
         self.name = name
-        self.info_key = info_key
         self.ordinal = ordinal
 
         # Column instance for fields which have been bound (non-DB
@@ -223,11 +261,10 @@ class OrderField(FieldMixin, Base):
         self.column = None
 
     def __repr__(self):
-        return '%s%r' % (self.__class__.__name__, (self.name, self.info_key,
-                                                   self.ordinal))
+        return '%s%r' % (self.__class__.__name__, (self.name, self.ordinal))
 
-    def duplicate(self):
-        return Ordinal(self.name, self.info_key, self.ordinal)
+    def __copy__(self):
+        return Ordinal(self.name, self.ordinal)
 
 
 class RunField(FieldMixin, Base):
@@ -238,24 +275,18 @@ class RunField(FieldMixin, Base):
                            index=True)
     name = Column("Name", String(256))
 
-    # The info key describes the key to expect this field to be present as in
-    # the reported machine information. Missing keys result in NULL values in
-    # the database.
-    info_key = Column("InfoKey", String(256))
-
-    def __init__(self, name, info_key):
+    def __init__(self, name):
         self.name = name
-        self.info_key = info_key
 
         # Column instance for fields which have been bound (non-DB
         # parameter). This is provided for convenience in querying.
         self.column = None
 
     def __repr__(self):
-        return '%s%r' % (self.__class__.__name__, (self.name, self.info_key))
+        return '%s%r' % (self.__class__.__name__, (self.name, ))
 
-    def duplicate(self):
-        return RunField(self.name, self.info_key)
+    def __copy__(self):
+        return RunField(self.name)
 
 
 class SampleField(FieldMixin, Base):
@@ -268,43 +299,51 @@ class SampleField(FieldMixin, Base):
 
     # The type of sample this is.
     type_id = Column("Type", Integer, ForeignKey('SampleType.ID'))
-    type = relation(SampleType)
-
-    # The info key describes the key to expect this field to be present as in
-    # the reported machine information. Missing keys result in NULL values in
-    # the database.
-    info_key = Column("InfoKey", String(256))
+    type = relation(SampleType, lazy='immediate')
 
     # The status field is used to create a relation to the sample field that
     # reports the status (pass/fail/etc.) code related to this value. This
     # association is used by UI code to present the two status fields together.
     status_field_id = Column("status_field", Integer, ForeignKey(
             'TestSuiteSampleFields.ID'))
-    status_field = relation('SampleField', remote_side=id)
+    status_field = relation('SampleField', remote_side=id, lazy='immediate')
 
     # Most real type samples assume lower values are better than higher values.
     # This assumption can be inverted by setting this column to nonzero.
     bigger_is_better = Column("bigger_is_better", Integer)
 
-    def __init__(self, name, type, info_key, status_field=None,
-                 bigger_is_better=0):
+    def __init__(self, name, type, status_field=None, bigger_is_better=0,
+                 display_name=None, unit=None, unit_abbrev=None):
         self.name = name
         self.type = type
-        self.info_key = info_key
         self.status_field = status_field
         self.bigger_is_better = bigger_is_better
+        self.display_name = name if display_name is None else display_name
+        self.unit = unit
+        self.unit_abbrev = unit_abbrev
 
         # Column instance for fields which have been bound (non-DB
         # parameter). This is provided for convenience in querying.
         self.column = None
 
-    def __repr__(self):
-        return '%s%r' % (self.__class__.__name__, (self.name, self.type,
-                                                   self.info_key))
+    @sqlalchemy.orm.reconstructor
+    def init_on_load(self):
+        self.display_name = self.name
+        self.unit = None
+        self.unit_abbrev = None
 
-    def duplicate(self):
-        return SampleField(self.name, self.type, self.info_key,
-                           self.status_field, self.bigger_is_better)
+    def __repr__(self):
+        return '%s%r' % (self.__class__.__name__, (self.name, self.type, ))
+
+    def __copy__(self):
+        return SampleField(self.name, self.type, self.status_field,
+                           self.bigger_is_better, self.display_name, self.unit,
+                           self.unit_abbrev)
+
+    def copy_info(self, other):
+        self.display_name = other.display_name
+        self.unit = other.unit
+        self.unit_abbrev = other.unit_abbrev
 
 
 def _upgrade_to(connectable, tsschema, new_schema, dry_run=False):
@@ -421,7 +460,9 @@ def _sync_fields(session, existing_fields, new_fields):
                 existing = existing_field
                 break
         if existing is None:
-            existing_fields.append(new_field.duplicate())
+            existing_fields.append(new_field.__copy__())
+        elif hasattr(existing, 'copy_info'):
+            existing.copy_info(new_field)
 
 
 def sync_testsuite_with_metatables(session, testsuite):

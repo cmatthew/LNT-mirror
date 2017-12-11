@@ -1,9 +1,12 @@
+#!/bin/bash
 # RUN: rm -rf %t.instance
 # RUN: rm -rf %t.tmp && mkdir -p %t.tmp
 # RUN: python %{shared_inputs}/create_temp_instance.py \
 # RUN:   %s %{shared_inputs}/SmallInstance %t.instance
-# RUN: %{shared_inputs}/server_wrapper.sh %t.instance 9091 \
+# RUN: %{shared_inputs}/server_wrapper.sh --fail-on-error %t.instance 9091 \
 # RUN:    /bin/sh %s %t.tmp %S/Inputs %{shared_inputs} %{src_root}
+
+set -eux
 
 OUTPUT_DIR="$1"
 INPUTS="$2"
@@ -29,11 +32,11 @@ lnt submit "http://localhost:9091/db_default/submitRun" "${SHARED_INPUTS}/sample
 
 
 # Make sure the old --commit=1 style argument is still accepted.
-lnt submit "http://localhost:9091/db_default/submitRun" --commit=1 "${SHARED_INPUTS}/sample-report.json" > "${OUTPUT_DIR}/submit0.txt"
+lnt submit "http://localhost:9091/db_default/submitRun" --commit=1 "${SHARED_INPUTS}/sample-report1.json" > "${OUTPUT_DIR}/submit0.txt"
 # RUN: FileCheck %s --check-prefix=CHECK-SUBMIT0 < %t.tmp/submit0.txt
 # CHECK-SUBMIT0: http://localhost:9091/db_default/v4/nts/4
 
-lnt submit "http://localhost:9091/db_default/submitRun" --commit 1 "${SHARED_INPUTS}/sample-report.json" > "${OUTPUT_DIR}/submit1.txt"
+lnt submit "http://localhost:9091/db_default/submitRun" --commit 1 "${SHARED_INPUTS}/sample-report2.json" > "${OUTPUT_DIR}/submit1.txt"
 # RUN: FileCheck %s --check-prefix=CHECK-SUBMIT1 < %t.tmp/submit1.txt
 # CHECK-SUBMIT1: http://localhost:9091/db_default/v4/nts/5
 
@@ -74,7 +77,7 @@ lnt submit "http://localhost:9091/db_default/submitRun" "${SRC_ROOT}/docs/report
 # For the old submitters/formats we have some detection logic to determine the
 # test-suite based on the Info.Run.tag field instead of the URL. The result
 # should be the same as using the "correct" URL.
-lnt submit "http://localhost:9091/db_default/submitRun" "${INPUTS}/compile_submission.json" -v > "${OUTPUT_DIR}/submit_compile1.txt"
+lnt submit "http://localhost:9091/db_default/submitRun" "${INPUTS}/compile_submission1.json" -v > "${OUTPUT_DIR}/submit_compile1.txt"
 # RUN: FileCheck %s --check-prefix=CHECK-COMPILE1 < %t.tmp/submit_compile1.txt
 #
 # CHECK-COMPILE1: Import succeeded.
@@ -85,25 +88,40 @@ lnt submit "http://localhost:9091/db_default/submitRun" "${INPUTS}/compile_submi
 # CHECK-COMPILE1: Results available at: http://localhost:9091/db_default/v4/compile/6
 
 # Check some error handling/reporting
-rm -f "${OUTPUT_DIR}/submit_errors.txt"
-lnt submit "http://localhost:9091/db_default/v4/badsuite/submitRun" "${INPUTS}/compile_submission.json" >> "${OUTPUT_DIR}/submit_errors.txt" 2>&1
 # RUN: FileCheck %s --check-prefix=CHECK-ERRORS < %t.tmp/submit_errors.txt
+rm -f "${OUTPUT_DIR}/submit_errors.txt"
+
+echo "=== compile_submission.json badsuite" >> "${OUTPUT_DIR}/submit_errors.txt"
+not lnt submit "http://localhost:9091/db_default/v4/badsuite/submitRun" "${INPUTS}/compile_submission.json" >> "${OUTPUT_DIR}/submit_errors.txt" 2>&1
+# CHECK-ERRORS-LABEL: === compile_submission.json badsuite
 # CHECK-ERRORS: error: lnt server: Unknown test suite 'badsuite'!
-lnt submit "http://localhost:9091/db_baddb/v4/compile/submitRun" "${INPUTS}/compile_submission.json" >> "${OUTPUT_DIR}/submit_errors.txt" 2>&1
+
+echo "=== compile_submission.json baddb" >> "${OUTPUT_DIR}/submit_errors.txt"
+not lnt submit "http://localhost:9091/db_baddb/v4/compile/submitRun" "${INPUTS}/compile_submission.json" >> "${OUTPUT_DIR}/submit_errors.txt" 2>&1
+# CHECK_ERROR-LABEL: === compile_submission.json baddb
 # CHECK-ERRORS: error: lnt server: The page you are looking for does not exist.
-lnt submit "http://localhost:9091/db_default/v4/compile/submitRun" "${INPUTS}/invalid_submission0.json" >> "${OUTPUT_DIR}/submit_errors.txt" 2>&1
+
+echo "=== invalid_submission0.json" >> "${OUTPUT_DIR}/submit_errors.txt"
+not lnt submit "http://localhost:9091/db_default/v4/compile/submitRun" "${INPUTS}/invalid_submission0.json" >> "${OUTPUT_DIR}/submit_errors.txt" 2>&1
+# CHECK-ERRORS-LABEL: === invalid_submission0.json
 # CHECK-ERRORS: error: lnt server: could not parse input format
 # ...
-# CHECK-ERRORS: SystemExit: unable to guess input format for
-lnt submit "http://localhost:9091/db_default/v4/compile/submitRun" "${INPUTS}/invalid_submission1.json" >> "${OUTPUT_DIR}/submit_errors.txt" 2>&1
-# CHECK-ERRORS: error: lnt server: import failure: machine
+# CHECK-ERRORS: ValueError: unable to guess input format for
+
+echo "=== invalid_submission1.json" >> "${OUTPUT_DIR}/submit_errors.txt"
+not lnt submit "http://localhost:9091/db_default/v4/compile/submitRun" "${INPUTS}/invalid_submission1.json" >> "${OUTPUT_DIR}/submit_errors.txt" 2>&1
+# CHECK-ERRORS-LABEL: === invalid_submission1.json
+# CHECK-ERRORS: error: lnt server: Invalid input format: No 'run' section in submission
 # ...
-# CHECK-ERRORS: KeyError: 'machine'
-lnt submit "http://localhost:9091/db_default/v4/compile/submitRun" "${INPUTS}/compile_submission_machine_diff_reject.json" >> "${OUTPUT_DIR}/submit_errors.txt" 2>&1
+# CHECK-ERRORS: ValueError: No 'run' section in submission
+
+echo "=== compile_submission_machine_diff_reject.json" >> "${OUTPUT_DIR}/submit_errors.txt"
+not lnt submit "http://localhost:9091/db_default/v4/compile/submitRun" "${INPUTS}/compile_submission_machine_diff_reject.json" >> "${OUTPUT_DIR}/submit_errors.txt" 2>&1
+# CHECK-ERRORS-LABEL: === compile_submission_machine_diff_reject.json
 # CHECK-ERRORS: error: lnt server: import failure: 'hw.activecpu' on machine 'some-compile-suite-machine' changed.
 # ...
 # CHECK-ERRORS: MachineInfoChanged: 'hw.activecpu' on machine 'some-compile-suite-machine' changed.
-# CHECK-ERRORS: Note: Use --update-machine to update the existing machine information.
+# CHECK-ERRORS: Note: Use --select-machine=update to update the existing machine information.
 
 
 
@@ -123,7 +141,7 @@ lnt submit "http://localhost:9091/db_default/v4/compile/submitRun" "${INPUTS}/co
 # CHECK-MACHINEDIFF: Results available at: http://localhost:9091/db_default/v4/compile/7
 
 # Test updating existing machine
-lnt submit "http://localhost:9091/db_default/v4/compile/submitRun" "${INPUTS}/compile_submission_machine_diff_reject.json" --update-machine -v > "${OUTPUT_DIR}/submit_compile_machine_update.txt"
+lnt submit "http://localhost:9091/db_default/v4/compile/submitRun" "${INPUTS}/compile_submission_machine_diff_reject.json" --select-machine=update -v > "${OUTPUT_DIR}/submit_compile_machine_update.txt"
 # RUN: FileCheck %s --check-prefix=CHECK-UPDATEMACHINE < %t.tmp/submit_compile_machine_update.txt
 #
 # CHECK-UPDATEMACHINE: Imported Data
@@ -136,3 +154,18 @@ lnt submit "http://localhost:9091/db_default/v4/compile/submitRun" "${INPUTS}/co
 # CHECK-UPDATEMACHINE: ----------------
 # CHECK-UPDATEMACHINE: PASS : 9
 # CHECK-UPDATEMACHINE: Results available at: http://localhost:9091/db_default/v4/compile/8
+
+# Test creation of new machines on information mismatch in split mode.
+lnt submit "http://localhost:9091/db_default/v4/compile/submitRun" "${INPUTS}/compile_submission_machine_diff_split.json" --select-machine=split -v > "${OUTPUT_DIR}/submit_compile_machine_split.txt"
+# RUN: FileCheck %s --check-prefix=CHECK-SPLITMACHINE < %t.tmp/submit_compile_machine_split.txt
+#
+# We should have added a new machine:
+# CHECK-SPLITMACHINE: Imported Data
+# CHECK-SPLITMACHINE: -------------
+# CHECK-SPLITMACHINE: Added Machines: 1
+# CHECK-SPLITMACHINE: Added Runs    : 1
+#
+# CHECK-SPLITMACHINE: Results
+# CHECK-SPLITMACHINE: ----------------
+# CHECK-SPLITMACHINE: PASS : 5
+# CHECK-SPLITMACHINE: Results available at: http://localhost:9091/db_default/v4/compile/9

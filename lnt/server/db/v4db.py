@@ -1,11 +1,10 @@
-from lnt.testing.util.commands import fatal
 import glob
 import yaml
 import sys
 
 try:
     import threading
-except:
+except Exception:
     import dummy_threading as threading
 
 import sqlalchemy
@@ -17,6 +16,7 @@ import lnt.server.db.migrate
 
 from lnt.util import logger
 from lnt.server.db import testsuite
+from sqlalchemy.orm import joinedload, subqueryload
 import lnt.server.db.util
 
 
@@ -24,45 +24,39 @@ class V4DB(object):
     """
     Wrapper object for LNT v0.4+ databases.
     """
-
-    _db_updated = set()
-    _engine_lock = threading.Lock()
-    _engine = {}
-
-    def _load_schema_file(self, session, schema_file):
+    def _load_schema_file(self, schema_file):
+        session = self.make_session(expire_on_commit=False)
         with open(schema_file) as schema_fd:
             data = yaml.load(schema_fd)
         suite = testsuite.TestSuite.from_json(data)
         testsuite.check_testsuite_schema_changes(session, suite)
         suite = testsuite.sync_testsuite_with_metatables(session, suite)
         session.commit()
+        session.close()
 
-        name = suite.name
-        ts = lnt.server.db.testsuitedb.TestSuiteDB(self, name, suite,
-                                                   create_tables=True)
-        if name in self.testsuite:
-            logger.error("Duplicate test-suite '%s' (while loading %s)" %
-                         (name, schema_file))
-        self.testsuite[name] = ts
+        # Create tables if necessary
+        tsdb = lnt.server.db.testsuitedb.TestSuiteDB(self, suite.name, suite)
+        tsdb.create_tables(self.engine)
+        return tsdb
 
-    def _load_schemas(self, session):
+    def _load_schemas(self):
         # Load schema files (preferred)
         schemasDir = self.config.schemasDir
         for schema_file in glob.glob('%s/*.yaml' % schemasDir):
-            try:
-                self._load_schema_file(session, schema_file)
-            except Exception as e:
-                fatal("Could not load schema '%s': %s\n" % (schema_file, e))
+            tsdb = self._load_schema_file(schema_file)
+            self.testsuite[tsdb.name] = tsdb
 
-        # Load schemas from database (deprecated)
+        # Load schemas from database.
+        session = self.make_session(expire_on_commit=False)
         ts_list = session.query(testsuite.TestSuite).all()
+        session.expunge_all()
+        session.close()
         for suite in ts_list:
             name = suite.name
             if name in self.testsuite:
                 continue
-            ts = lnt.server.db.testsuitedb.TestSuiteDB(self, name, suite,
-                                                       create_tables=False)
-            self.testsuite[name] = ts
+            tsdb = lnt.server.db.testsuitedb.TestSuiteDB(self, name, suite)
+            self.testsuite[name] = tsdb
 
     def __init__(self, path, config, baseline_revision=0):
         # If the path includes no database type, assume sqlite.
@@ -72,55 +66,29 @@ class V4DB(object):
         self.path = path
         self.config = config
         self.baseline_revision = baseline_revision
-        with V4DB._engine_lock:
-            if path not in V4DB._engine:
-                connect_args = {}
-                if path.startswith("sqlite://"):
-                    # Some of the background tasks keep database transactions
-                    # open for a long time. Make it less likely to hit
-                    # "(OperationalError) database is locked" because of that.
-                    connect_args['timeout'] = 30
-                engine = sqlalchemy.create_engine(path,
-                                                  connect_args=connect_args)
-                V4DB._engine[path] = engine
-        self.engine = V4DB._engine[path]
+        connect_args = {}
+        if path.startswith("sqlite://"):
+            # Some of the background tasks keep database transactions
+            # open for a long time. Make it less likely to hit
+            # "(OperationalError) database is locked" because of that.
+            connect_args['timeout'] = 30
+        self.engine = sqlalchemy.create_engine(path,
+                                               connect_args=connect_args)
 
         # Update the database to the current version, if necessary. Only check
         # this once per path.
-        if path not in V4DB._db_updated:
-            lnt.server.db.migrate.update(self.engine)
-            V4DB._db_updated.add(path)
+        lnt.server.db.migrate.update(self.engine)
 
-        self.session = sqlalchemy.orm.sessionmaker(self.engine)()
-
-        # Add several shortcut aliases.
-        self.add = self.session.add
-        self.delete = self.session.delete
-        self.commit = self.session.commit
-        self.query = self.session.query
-        self.rollback = self.session.rollback
-
-        # For parity with the usage of TestSuiteDB, we make our primary model
-        # classes available as instance variables.
-        self.SampleType = testsuite.SampleType
-        self.StatusKind = testsuite.StatusKind
-        self.TestSuite = testsuite.TestSuite
-        self.SampleField = testsuite.SampleField
+        self.sessionmaker = sqlalchemy.orm.sessionmaker(self.engine)
 
         self.testsuite = dict()
-        self._load_schemas(self.session)
+        self._load_schemas()
 
     def close(self):
-        if self.session is not None:
-            self.session.close()
+        self.engine.dispose()
 
-    @staticmethod
-    def close_all_engines():
-        with V4DB._engine_lock:
-            for key, engine in V4DB._engine.items():
-                engine.dispose()
-            V4DB._engine = {}
-            V4DB._db_updated = set()
+    def make_session(self, expire_on_commit=True):
+        return self.sessionmaker(expire_on_commit=expire_on_commit)
 
     def settings(self):
         """All the setting needed to recreate this instnace elsewhere."""

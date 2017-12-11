@@ -2,11 +2,8 @@ import os
 import shutil
 import tarfile
 import tempfile
-
 import lnt.server.config
-
 from lnt.util import logger
-from lnt.testing.util.commands import fatal
 
 
 class Instance(object):
@@ -47,13 +44,14 @@ class Instance(object):
             else:
                 filenames = os.listdir(tmpdir)
                 if len(filenames) != 1:
-                    fatal("unable to find LNT instance inside tarfile")
+                    raise Exception("Unable to find LNT instance "
+                                    "inside tarfile")
                 config_path = os.path.join(tmpdir, filenames[0], "lnt.cfg")
         else:
             config_path = path
 
         if not config_path or not os.path.exists(config_path):
-            fatal("invalid config: %r" % config_path)
+            raise Exception("Invalid config: %r" % config_path)
 
         config_data = {}
         exec open(config_path) in config_data
@@ -65,11 +63,14 @@ class Instance(object):
         self.config_path = config_path
         self.config = config
         self.tmpdir = tmpdir
+        self.databases = dict()
+        for name in self.config.get_database_names():
+            self.databases[name] = self.config.get_database(name)
 
     def __del__(self):
         # If we have a temporary dir, clean it up now.
         if self.tmpdir is not None:
             shutil.rmtree(self.tmpdir)
 
-    def get_database(self, *args, **kwargs):
-        return self.config.get_database(*args, **kwargs)
+    def get_database(self, name):
+        return self.databases.get(name, None)

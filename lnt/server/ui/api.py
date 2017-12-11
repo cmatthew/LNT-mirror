@@ -8,31 +8,10 @@ from sqlalchemy.orm import joinedload
 from sqlalchemy.orm.exc import NoResultFound
 
 from lnt.server.ui.util import convert_revision
+from lnt.server.ui.decorators import in_db
 from lnt.testing import PASS
 from lnt.util import logger
 from functools import wraps
-
-
-def in_db(func):
-    """Extract the database information off the request and attach to
-    particular test suite and database."""
-
-    def wrap(*args, **kwargs):
-        db = kwargs.pop('db')
-        ts = kwargs.pop('ts')
-        g.db_name = db
-        g.testsuite_name = ts
-        g.db_info = current_app.old_config.databases.get(g.db_name)
-        if g.db_info is None:
-            abort(404, message="Invalid database.")
-        # Compute result.
-        result = func(*args, **kwargs)
-
-        # Make sure that any transactions begun by this request are finished.
-        request.get_db().rollback()
-        return result
-
-    return wrap
 
 
 def requires_auth_token(f):
@@ -90,7 +69,8 @@ class Machines(Resource):
     @staticmethod
     def get():
         ts = request.get_testsuite()
-        machines = ts.query(ts.Machine).all()
+        session = request.session
+        machines = session.query(ts.Machine).all()
 
         result = common_fields_factory()
         result['machines'] = machines
@@ -104,18 +84,21 @@ class Machine(Resource):
     @staticmethod
     def _get_machine(machine_spec):
         ts = request.get_testsuite()
+        session = request.session
         # Assume id number if machine_spec is numeric, otherwise a name.
         if machine_spec.isdigit():
-            machine = ts.query(ts.Machine) \
+            machine = session.query(ts.Machine) \
                 .filter(ts.Machine.id == machine_spec).first()
         else:
-            machines = ts.query(ts.Machine) \
+            machines = session.query(ts.Machine) \
                 .filter(ts.Machine.name == machine_spec).all()
             if len(machines) == 0:
                 machine = None
             elif len(machines) > 1:
                 abort(404, msg="Name '%s' is ambiguous; specify machine id" %
                       (machine_spec))
+            else:
+                machine = machines[0]
         if machine is None:
             abort(404, msg="Did not find machine '%s'" % (machine_spec,))
         return machine
@@ -123,8 +106,9 @@ class Machine(Resource):
     @staticmethod
     def get(machine_spec):
         ts = request.get_testsuite()
+        session = request.session
         machine = Machine._get_machine(machine_spec)
-        machine_runs = ts.query(ts.Run) \
+        machine_runs = session.query(ts.Run) \
             .filter(ts.Run.machine_id == machine.id) \
             .options(joinedload(ts.Run.order)) \
             .all()
@@ -140,17 +124,18 @@ class Machine(Resource):
     @requires_auth_token
     def delete(machine_spec):
         ts = request.get_testsuite()
+        session = request.session
         machine = Machine._get_machine(machine_spec)
 
-        # Just saying ts.session.delete(machine) takes a long time and risks
+        # Just saying session.delete(machine) takes a long time and risks
         # running into OOM or timeout situations for machines with a hundreds
         # of runs. So instead remove machine runs in chunks.
         def perform_delete(ts, machine):
-            count = ts.query(ts.Run) \
+            count = session.query(ts.Run) \
                 .filter(ts.Run.machine_id == machine.id).count()
             at = 0
             while True:
-                runs = ts.query(ts.Run) \
+                runs = session.query(ts.Run) \
                     .filter(ts.Run.machine_id == machine.id) \
                     .options(joinedload(ts.Run.samples)) \
                     .options(joinedload(ts.Run.fieldchanges)) \
@@ -163,12 +148,12 @@ class Machine(Resource):
                 logger.info(msg)
                 yield msg + '\n'
                 for run in runs:
-                    ts.session.delete(run)
-                ts.commit()
+                    session.delete(run)
+                session.commit()
 
             machine_name = "%s:%s" % (machine.name, machine.id)
-            ts.session.delete(machine)
-            ts.commit()
+            session.delete(machine)
+            session.commit()
             msg = "Deleted machine %s" % machine_name
             logger.info(msg)
             yield msg + '\n'
@@ -184,12 +169,14 @@ class Machine(Resource):
         data = json.loads(request.data)
         machine_data = data['machine']
         machine.set_from_dict(machine_data)
+        session = request.session
         ts = request.get_testsuite()
-        ts.commit()
+        session.commit()
 
     @staticmethod
     @requires_auth_token
     def post(machine_spec):
+        session = request.session
         ts = request.get_testsuite()
         machine = Machine._get_machine(machine_spec)
         machine_name = "%s:%s" % (machine.name, machine.id)
@@ -201,12 +188,13 @@ class Machine(Resource):
             name = request.values.get('name', None)
             if name is None:
                 abort(400, msg="Expected 'name' for rename request")
-            existing = ts.query(ts.Machine).filter(ts.Machine.name == name) \
+            existing = session.query(ts.Machine) \
+                .filter(ts.Machine.name == name) \
                 .first()
             if existing is not None:
                 abort(400, msg="Machine with name '%s' already exists" % name)
             machine.name = name
-            ts.session.commit()
+            session.commit()
             logger.info("Renamed machine %s to %s" % (machine_name, name))
         elif action == 'merge':
             into_id = request.values.get('into', None)
@@ -214,15 +202,15 @@ class Machine(Resource):
                 abort(400, msg="Expected 'into' for merge request")
             into = Machine._get_machine(into_id)
             into_name = "%s:%s" % (into.name, into.id)
-            ts.query(ts.Run) \
+            session.query(ts.Run) \
                 .filter(ts.Run.machine_id == machine.id) \
                 .update({ts.Run.machine_id: into.id},
                         synchronize_session=False)
-            ts.session.expire_all()  # be safe after synchronize_session==False
+            session.expire_all()  # be safe after synchronize_session==False
             # re-query Machine so we can delete it.
             machine = Machine._get_machine(machine_spec)
-            ts.delete(machine)
-            ts.session.commit()
+            session.delete(machine)
+            session.commit()
             logger.info("Merged machine %s into %s" %
                         (machine_name, into_name))
             logger.info("Deleted machine %s" % machine_name)
@@ -235,9 +223,10 @@ class Run(Resource):
 
     @staticmethod
     def get(run_id):
+        session = request.session
         ts = request.get_testsuite()
         try:
-            run = ts.query(ts.Run) \
+            run = session.query(ts.Run) \
                 .filter(ts.Run.id == run_id) \
                 .options(joinedload(ts.Run.machine)) \
                 .options(joinedload(ts.Run.order)) \
@@ -249,7 +238,7 @@ class Run(Resource):
         for f in ts.sample_fields:
             to_get.append(f.column)
 
-        sample_query = ts.query(*to_get) \
+        sample_query = session.query(*to_get) \
             .join(ts.Test) \
             .filter(ts.Sample.run_id == run_id) \
             .all()
@@ -267,12 +256,13 @@ class Run(Resource):
     @staticmethod
     @requires_auth_token
     def delete(run_id):
+        session = request.session
         ts = request.get_testsuite()
-        run = ts.query(ts.Run).filter(ts.Run.id == run_id).first()
+        run = session.query(ts.Run).filter(ts.Run.id == run_id).first()
         if run is None:
             abort(404, msg="Did not find run " + str(run_id))
-        ts.delete(run)
-        ts.commit()
+        session.delete(run)
+        session.commit()
         logger.info("Deleted run %s" % (run_id,))
 
 
@@ -284,13 +274,14 @@ class Runs(Resource):
     @requires_auth_token
     def post():
         """Add a new run into the lnt database"""
+        session = request.session
         db = request.get_db()
         data = request.data
-        updateMachine = request.values.get('update_machine', False)
-        merge = request.values.get('merge', 'replace')
+        select_machine = request.values.get('select_machine', 'match')
+        merge = request.values.get('merge', None)
         result = lnt.util.ImportData.import_from_string(
-            current_app.old_config, g.db_name, db, g.testsuite_name, data,
-            updateMachine=updateMachine, mergeRun=merge)
+            current_app.old_config, g.db_name, db, session, g.testsuite_name,
+            data, select_machine=select_machine, merge_run=merge)
 
         error = result['error']
         if error is not None:
@@ -315,9 +306,11 @@ class Order(Resource):
 
     @staticmethod
     def get(order_id):
+        session = request.session
         ts = request.get_testsuite()
         try:
-            order = ts.query(ts.Order).filter(ts.Order.id == order_id).one()
+            order = session.query(ts.Order) \
+                .filter(ts.Order.id == order_id).one()
         except NoResultFound:
             abort(404, message="Invalid order.")
         result = common_fields_factory()
@@ -325,14 +318,24 @@ class Order(Resource):
         return result
 
 
+class Schema(Resource):
+    method_decorators = [in_db]
+
+    @staticmethod
+    def get():
+        ts = request.get_testsuite()
+        return ts.test_suite
+
+
 class SampleData(Resource):
     method_decorators = [in_db]
 
     @staticmethod
     def get(sample_id):
+        session = request.session
         ts = request.get_testsuite()
         try:
-            sample = ts.query(ts.Sample) \
+            sample = session.query(ts.Sample) \
                 .filter(ts.Sample.id == sample_id) \
                 .one()
         except NoResultFound:
@@ -349,6 +352,7 @@ class SamplesData(Resource):
     @staticmethod
     def get():
         """Get the data for a particular line in a graph."""
+        session = request.session
         ts = request.get_testsuite()
         args = request.args.to_dict(flat=False)
         # Maybe we don't need to do this?
@@ -366,7 +370,7 @@ class SamplesData(Resource):
         for f in ts.sample_fields:
             to_get.append(f.column)
 
-        q = ts.query(*to_get) \
+        q = session.query(*to_get) \
             .join(ts.Test) \
             .join(ts.Run) \
             .join(ts.Order) \
@@ -387,21 +391,22 @@ class Graph(Resource):
     @staticmethod
     def get(machine_id, test_id, field_index):
         """Get the data for a particular line in a graph."""
+        session = request.session
         ts = request.get_testsuite()
         # Maybe we don't need to do this?
         try:
-            machine = ts.query(ts.Machine) \
+            machine = session.query(ts.Machine) \
                 .filter(ts.Machine.id == machine_id) \
                 .one()
-            test = ts.query(ts.Test) \
+            test = session.query(ts.Test) \
                 .filter(ts.Test.id == test_id) \
                 .one()
             field = ts.sample_fields[field_index]
         except NoResultFound:
             abort(404)
 
-        q = ts.query(field.column, ts.Order.llvm_project_revision,
-                     ts.Run.start_time, ts.Run.id) \
+        q = session.query(field.column, ts.Order.llvm_project_revision,
+                          ts.Run.start_time, ts.Run.id) \
             .join(ts.Run) \
             .join(ts.Order) \
             .filter(ts.Run.machine_id == machine.id) \
@@ -435,10 +440,11 @@ class Regression(Resource):
     @staticmethod
     def get(machine_id, test_id, field_index):
         """Get the regressions for a particular line in a graph."""
+        session = request.session
         ts = request.get_testsuite()
         field = ts.sample_fields[field_index]
         # Maybe we don't need to do this?
-        fcs = ts.query(ts.FieldChange) \
+        fcs = session.query(ts.FieldChange) \
             .filter(ts.FieldChange.machine_id == machine_id) \
             .filter(ts.FieldChange.test_id == test_id) \
             .filter(ts.FieldChange.field_id == field.id) \
@@ -451,10 +457,10 @@ class Regression(Resource):
             # If we don't find anything, lets see if we are even looking
             # for a valid thing to provide a nice error.
             try:
-                ts.query(ts.Machine) \
+                session.query(ts.Machine) \
                     .filter(ts.Machine.id == machine_id) \
                     .one()
-                ts.query(ts.Test) \
+                session.query(ts.Test) \
                     .filter(ts.Test.id == test_id) \
                     .one()
                 _ = ts.sample_fields[field_index]
@@ -462,9 +468,9 @@ class Regression(Resource):
                 abort(404)
             # I think we found nothing.
             return []
-        regressions = ts.query(ts.Regression.title, ts.Regression.id,
-                               ts.RegressionIndicator.field_change_id,
-                               ts.Regression.state) \
+        regressions = session.query(ts.Regression.title, ts.Regression.id,
+                                    ts.RegressionIndicator.field_change_id,
+                                    ts.Regression.state) \
             .join(ts.RegressionIndicator) \
             .filter(ts.RegressionIndicator.field_change_id.in_(fc_ids)) \
             .all()
@@ -501,6 +507,7 @@ def load_api_resources(api):
     api.add_resource(Run, ts_path("runs/<int:run_id>"))
     api.add_resource(SamplesData, ts_path("samples"), ts_path("samples/"))
     api.add_resource(SampleData, ts_path("samples/<sample_id>"))
+    api.add_resource(Schema, ts_path("schema"), ts_path("schema/"))
     api.add_resource(Order, ts_path("orders/<int:order_id>"))
     graph_url = "graph/<int:machine_id>/<int:test_id>/<int:field_index>"
     api.add_resource(Graph, ts_path(graph_url))
