@@ -1021,13 +1021,13 @@ class TestSuiteDB(object):
             name = test_data['name']
             test = test_cache.get(name)
             if test is None:
-                test_from_db = self.query(self.Test).filter(self.Test.name == name).one_or_none()
+                test_from_db = session.query(self.Test).filter(self.Test.name == name).one_or_none()
                 if not test_from_db:
                     test = self.Test(test_data['name'])
                     test_cache[name] = test
-                    self.add(test)
+                    session.add(test)
                     try:
-                        self.commit()
+                        session.commit()
                     except:
                         logger.exception("Duplicate Entry")
                         raise
