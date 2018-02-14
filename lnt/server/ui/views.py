@@ -18,7 +18,7 @@ from flask import request, url_for
 from flask_wtf import Form
 from sqlalchemy.orm import joinedload
 from sqlalchemy.orm.exc import NoResultFound
-from typing import List, Optional
+from typing import List, Optional, Text, Union
 from wtforms import SelectField, StringField, SubmitField
 from wtforms.validators import DataRequired, Length
 
@@ -32,16 +32,19 @@ import lnt.server.ui.util
 import lnt.util
 import lnt.util.ImportData
 import lnt.util.stats
+from lnt.external.stats import stats as ext_stats
 from lnt.server.reporting.analysis import ComparisonResult, calc_geomean
+from lnt.server.ui import util
 from lnt.server.ui.decorators import frontend, db_route, v4_route
 from lnt.server.ui.globals import db_url_for, v4_url_for
 from lnt.server.ui.util import FLASH_DANGER, FLASH_SUCCESS, FLASH_INFO
 from lnt.server.ui.util import PrecomputedCR
+from lnt.server.ui.util import baseline_key, convert_revision
 from lnt.server.ui.util import mean
-
+from lnt.testing import PASS
 from lnt.util import logger
 from lnt.util import multidict
-from lnt.server.ui.util import baseline_key, convert_revision
+from lnt.util import stats
 
 
 # http://flask.pocoo.org/snippets/62/
@@ -289,7 +292,6 @@ def v4_machine_compare(machine_id):
 def v4_machine(id):
 
     # Compute the list of associated runs, grouped by order.
-    from lnt.server.ui import util
 
     # Gather all the runs on this machine.
     session = request.session
@@ -744,10 +746,6 @@ def v4_graph_for_sample(sample_id, field_name):
 
 @v4_route("/graph")
 def v4_graph():
-    from lnt.server.ui import util
-    from lnt.testing import PASS
-    from lnt.util import stats
-    from lnt.external.stats import stats as ext_stats
 
     session = request.session
     ts = request.get_testsuite()
@@ -810,7 +808,7 @@ def v4_graph():
             machine_id = int(machine_id_str)
             test_id = int(test_id_str)
             field_index = int(field_index_str)
-        except Exception:
+        except ValueError:
             return abort(400)
 
         if not (0 <= field_index < len(ts.sample_fields)):
@@ -919,6 +917,7 @@ def v4_graph():
     graph_datum = []
     overview_plots = []
     baseline_plots = []
+    revision_cache = {}
     num_plots = len(graph_parameters)
     for i, (machine, test, field, field_index) in enumerate(graph_parameters):
         # Determine the base plot color.
@@ -949,7 +948,8 @@ def v4_graph():
         # Aggregate by revision.
         data = multidict.multidict((rev, (val, date, run_id))
                                    for val, rev, date, run_id in q).items()
-        data.sort(key=lambda sample: convert_revision(sample[0]))
+
+        data.sort(key=lambda sample: convert_revision(sample[0], cache=revision_cache))
 
         graph_datum.append((test.name, data, col, field, url))
 
@@ -1033,7 +1033,6 @@ def v4_graph():
         else:
             normalize_by = 1.0
 
-        using_ints = True
         for pos, (point_label, datapoints) in enumerate(data):
             # Get the samples.
             data = [data_date[0] for data_date in datapoints]
@@ -1043,12 +1042,7 @@ def v4_graph():
             runs = [data_pts[2]
                     for data_pts in datapoints if len(data_pts) == 3]
 
-            # When we can, map x-axis to revisions, but when that is too hard
-            # use the position of the sample instead.
-            rev_x = convert_revision(point_label)
-            if using_ints and len(rev_x) != 1:
-                using_ints = False
-            x = rev_x[0] if using_ints else pos
+            x = determine_x_value(point_label, pos, revision_cache)
 
             values = [v*normalize_by for v in data]
             aggregation_fn = min
@@ -1098,12 +1092,11 @@ def v4_graph():
         # Compute the moving average and or moving median of our data if
         # requested.
         if moving_average or moving_median:
-            fun = None
 
-            def compute_moving_average(x, window, average_list, median_list):
+            def compute_moving_average(x, window, average_list, _):
                 average_list.append((x, lnt.util.stats.mean(window)))
 
-            def compute_moving_median(x, window, average_list, median_list):
+            def compute_moving_median(x, window, _, median_list):
                 median_list.append((x, lnt.util.stats.median(window)))
 
             def compute_moving_average_and_median(x, window, average_list,
@@ -1258,10 +1251,32 @@ def v4_graph():
                            **ts_data(ts))
 
 
+def determine_x_value(point_label, fallback, revision_cache):
+    # type: (Text, int, dict) -> Union(int|float)
+    """Given the order data, lets make a reasonable x axis value.
+
+    :param point_label: the text representation of the x value
+    :param fallback: The value to use for non
+    :param revision_cache: a dict to use as a cache for convert_revision.
+    :return: an integer or float value that is like the point_label or fallback.
+
+    """
+    rev_x = convert_revision(point_label, revision_cache)
+    if len(rev_x) == 1:
+        x = rev_x[0]
+    elif len(rev_x) == 2:
+        try:
+            x = float(point_label)
+        except ValueError:
+            # It might have dashes or something silly
+            x = float(str(rev_x[0]) + '.' + str(rev_x[1]))
+    else:
+        return fallback
+    return x
+
+
 @v4_route("/global_status")
 def v4_global_status():
-    from lnt.server.ui import util
-
     session = request.session
     ts = request.get_testsuite()
     metric_fields = sorted(list(ts.Sample.get_metric_fields()),
@@ -1419,7 +1434,6 @@ def v4_daily_report(year, month, day):
 
     filter_machine_regex = request.args.get('filter-machine-regex')
 
-    session = request.session
     ts = request.get_testsuite()
 
     # Create the report object.
@@ -1499,6 +1513,7 @@ def v4_summary_report_ui():
 
 @db_route("/summary_report")
 def v4_summary_report():
+    session = request.session
     # Load the summary report configuration.
     config_path = get_summary_config_path()
     if not os.path.exists(config_path):
@@ -1513,7 +1528,7 @@ You must define a summary report configuration first.""")
         request.get_db(), config['orders'], config['machine_names'],
         config['machine_patterns'])
     # Build the report.
-    report.build()
+    report.build(session)
 
     if bool(request.args.get('json')):
         json_obj = dict()
